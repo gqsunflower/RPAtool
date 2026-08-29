@@ -1,0 +1,15 @@
+{
+  "_comment": "ここに登録されたsite_keyとurlの組み合わせ以外、ブラウザハンドラは一切アクセスしません。検索エンジンへのアクセスやgotoによる自由な遷移は実装上できないようになっています。loginセレクタ・認証情報の環境変数名もここで管理します。",
+  "sites": {
+    "example_portal": {
+      "url": "https://example.com/portal/login",
+      "login": {
+        "username_selector": "#username",
+        "password_selector": "#password",
+        "submit_selector": "#login-button",
+        "username_env": "PORTAL_USERNAME",
+        "password_env": "PORTAL_PASSWORD"
+      }
+    }
+  }
+}

@@ -1,0 +1,121 @@
+{
+  "_comment": "各マクロはstepsの配列。handlerはexcel/pdf/browserのいずれか、actionは各handlerが実装する操作名。paramsに{{key}}と書くと実行時にユーザー入力(slots)で置換されます。未定義slotは実行前に対話で確認されます。",
+  "macros": {
+    "excel_extract_to_csv": {
+      "description": "Excelブックの指定シートを読み込みCSVに書き出す",
+      "required_slots": ["input_path", "sheet_name", "output_path"],
+      "steps": [
+        {
+          "handler": "excel",
+          "action": "load_workbook",
+          "params": {"path": "{{input_path}}"}
+        },
+        {
+          "handler": "excel",
+          "action": "read_sheet_to_records",
+          "params": {"sheet_name": "{{sheet_name}}"}
+        },
+        {
+          "handler": "excel",
+          "action": "write_records_to_csv",
+          "params": {"output_path": "{{output_path}}"}
+        }
+      ]
+    },
+    "excel_write_report": {
+      "description": "テンプレートExcelの指定セルにデータを書き込み、別名で保存する",
+      "required_slots": ["template_path", "sheet_name", "cell_values", "output_path"],
+      "steps": [
+        {
+          "handler": "excel",
+          "action": "load_workbook",
+          "params": {"path": "{{template_path}}"}
+        },
+        {
+          "handler": "excel",
+          "action": "write_cells",
+          "params": {"sheet_name": "{{sheet_name}}", "cell_values": "{{cell_values}}"}
+        },
+        {
+          "handler": "excel",
+          "action": "save_workbook_as",
+          "params": {"output_path": "{{output_path}}"}
+        }
+      ]
+    },
+    "pdf_extract_text": {
+      "description": "PDFの全ページからテキストを抽出しテキストファイルに保存する",
+      "required_slots": ["input_path", "output_path"],
+      "steps": [
+        {
+          "handler": "pdf",
+          "action": "extract_text",
+          "params": {"input_path": "{{input_path}}", "output_path": "{{output_path}}"}
+        }
+      ]
+    },
+    "pdf_merge": {
+      "description": "複数のPDFファイルを結合し1つのPDFにする",
+      "required_slots": ["input_paths", "output_path"],
+      "steps": [
+        {
+          "handler": "pdf",
+          "action": "merge_pdfs",
+          "params": {"input_paths": "{{input_paths}}", "output_path": "{{output_path}}"}
+        }
+      ]
+    },
+    "web_registered_login_download": {
+      "description": "config/whitelist_urls.jsonに登録されたサイトのみログインし、指定リンクをクリックしてダウンロードする",
+      "required_slots": ["site_key", "download_link_selector"],
+      "steps": [
+        {
+          "handler": "browser",
+          "action": "open_registered_site",
+          "params": {"site_key": "{{site_key}}"}
+        },
+        {
+          "handler": "browser",
+          "action": "login",
+          "params": {"site_key": "{{site_key}}"}
+        },
+        {
+          "handler": "browser",
+          "action": "click_selector",
+          "params": {"selector": "{{download_link_selector}}"}
+        },
+        {
+          "handler": "browser",
+          "action": "close",
+          "params": {}
+        }
+      ]
+    },
+    "web_registered_form_submit": {
+      "description": "config/whitelist_urls.jsonに登録されたサイトの決まったフォームに入力し送信する",
+      "required_slots": ["site_key", "form_values", "submit_selector"],
+      "steps": [
+        {
+          "handler": "browser",
+          "action": "open_registered_site",
+          "params": {"site_key": "{{site_key}}"}
+        },
+        {
+          "handler": "browser",
+          "action": "fill_form",
+          "params": {"form_values": "{{form_values}}"}
+        },
+        {
+          "handler": "browser",
+          "action": "click_selector",
+          "params": {"selector": "{{submit_selector}}"}
+        },
+        {
+          "handler": "browser",
+          "action": "close",
+          "params": {}
+        }
+      ]
+    }
+  }
+}

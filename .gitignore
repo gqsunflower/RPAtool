@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 実行時に自動生成されるもの(自動バックアップ・実行ログ・失敗時スクリーンショット・
+# クリップボード貼り付け画像)。ディレクトリ自体は.gitkeepで残す。
+config/backups/*
+!config/backups/.gitkeep
+logs/*.csv
+logs/*.xlsx
+logs/screenshots/*
+!logs/screenshots/.gitkeep
+workdir/

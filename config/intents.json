@@ -1,0 +1,55 @@
+{
+  "_comment": "各intentは『どんな指示文にマッチさせるか』と『どのマクロを実行するか』の対応表です。keywordsは全て含まれていれば加点、patternsは正規表現でマッチすれば高得点。scoreが最も高いintentが採用されます。閾値未満なら未認識として扱われます。",
+  "match_threshold": 1,
+  "intents": [
+    {
+      "id": "excel_extract_to_csv",
+      "description": "Excelファイルの指定シートを読み込みCSV等に変換する",
+      "keywords": ["excel", "読み込", "抽出", "変換"],
+      "patterns": ["excel.*(読み込|抽出|変換)"],
+      "macro": "excel_extract_to_csv"
+    },
+    {
+      "id": "excel_write_report",
+      "description": "テンプレートExcelにデータを書き込んで保存する",
+      "keywords": ["excel", "書き込", "レポート", "報告書"],
+      "patterns": ["excel.*(書き込|転記)"],
+      "macro": "excel_write_report"
+    },
+    {
+      "id": "pdf_extract_text",
+      "description": "PDFからテキスト/表を抽出する",
+      "keywords": ["pdf", "テキスト", "抽出"],
+      "patterns": ["pdf.*(テキスト|文字|抽出)"],
+      "macro": "pdf_extract_text"
+    },
+    {
+      "id": "pdf_merge",
+      "description": "複数PDFを結合する",
+      "keywords": ["pdf", "結合", "マージ"],
+      "patterns": ["pdf.*(結合|マージ)"],
+      "macro": "pdf_merge"
+    },
+    {
+      "id": "web_registered_login_download",
+      "description": "登録済みサイトにログインして特定ファイルをダウンロードする(検索は行わない)",
+      "keywords": ["ブラウザ", "サイト", "ダウンロード", "ログイン"],
+      "patterns": ["(ブラウザ|サイト).*(ログイン|ダウンロード)"],
+      "macro": "web_registered_login_download"
+    },
+    {
+      "id": "web_registered_form_submit",
+      "description": "登録済みサイトの決まったフォームに入力して送信する(検索は行わない)",
+      "keywords": ["ブラウザ", "フォーム", "入力", "送信"],
+      "patterns": ["(ブラウザ|サイト).*(入力|送信)"],
+      "macro": "web_registered_form_submit"
+    },
+    {
+      "id": "list_macros",
+      "description": "利用可能なマクロ一覧を表示する",
+      "keywords": ["一覧", "できること", "ヘルプ"],
+      "patterns": ["^(help|ヘルプ|一覧)$"],
+      "macro": "__list_macros__"
+    }
+  ]
+}

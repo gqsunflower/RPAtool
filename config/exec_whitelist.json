@@ -1,0 +1,4 @@
+{
+  "_comment": "ここに登録されたrun_keyのファイルのみ実行できます。ブラウザのwhitelist_urls.jsonと同じ考え方で、未登録のexe/pyは実行できません。kindは 'python'(pyファイルをPythonで実行) または 'exe'(実行ファイルを直接実行) です。",
+  "scripts": {}
+}

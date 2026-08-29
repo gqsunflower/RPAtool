@@ -1,0 +1,44 @@
+openpyxl>=3.1
+pdfplumber>=0.11
+pypdf>=4.0
+selenium>=4.20
+
+# 以下は任意機能向けの追加依存です。使わない機能があればインストール不要です。
+
+# Excelの「PDFとして保存」「.xlsm内マクロの実行」に必要。
+# Windows + Excel本体がインストールされた環境専用(pipだけではExcel本体は入りません)。
+pywin32; sys_platform == "win32"
+
+# PDFのOCR(ocr_pdf_to_text)に必要。
+# さらにOS側にTesseract OCR本体とPopplerのインストールが必要です
+# (pipだけではこれらの実行ファイルは入りません)。
+#   - Windows: 公式インストーラでTesseract-OCR、Popplerを別途導入し、PATHを通してください
+#   - macOS: brew install tesseract tesseract-lang poppler
+#   - Ubuntu/Debian: apt install tesseract-ocr tesseract-ocr-jpn poppler-utils
+pytesseract>=0.3
+pdf2image>=1.17
+
+# デスクトップ操作(画面上の画像を探してクリック・マウス移動・キー入力)に必要。
+# あいまい一致(confidence指定)を使う場合はさらに opencv-python も必要です。
+#   - Linux: python3-xlib が追加で必要になる場合があります
+#   - macOS: 「システム設定 > プライバシーとセキュリティ > アクセシビリティ / 画面収録」で
+#            実行しているターミナル/Pythonへのアクセス許可が必要です
+pyautogui>=0.9
+opencv-python>=4.9
+
+# GUI版レコーダー(gui_recorder.py)のクリップボード画像貼り付け・プレビュー表示に必要。
+# tkinter自体はPython標準ですが、環境によっては別途OSパッケージが必要な場合があります
+# (例: Ubuntu/Debianで `sudo apt install python3-tk`)。
+# クリップボードからの画像取得はWindows/macOSでは標準機能で動作しますが、
+# Linuxでは xclip または wl-paste のインストールが追加で必要です。
+Pillow>=10.0
+
+# GUI版レコーダー(gui_recorder.py)で、Excel/PDF/フォルダ/exe等のパス欄に
+# ファイルをドラッグ&ドロップできるようにするために必要(任意)。
+# インストールされていない場合、D&Dが使えないだけで「参照...」ボタンや
+# クリップボード貼り付け等の他の入力手段はそのまま使えます。
+tkinterdnd2>=0.4
+
+# テキスト加工の「クリップボードにコピーする」「クリップボードから取得する」に必要(任意)。
+# Linuxではさらに xclip または xsel のインストールが必要です。
+pyperclip>=1.8
