@@ -80,6 +80,7 @@ DOMAIN_ACTIONS = {
         "待機する", "画面をPDF保存する",
         "画面から文字を読み取る", "画面から属性値を読み取る", "画面から文字のリストを読み取る",
         "チェックボックスをON/OFFする",
+        "ウィンドウサイズを指定する", "ウィンドウ位置を指定する", "表示倍率(ズーム)を指定する",
     ],
     "explorer": [
         "パスを開く", "フォルダを作成する", "ファイルを移動する", "ファイルをコピーする",
@@ -90,7 +91,9 @@ DOMAIN_ACTIONS = {
     "process": ["exe/pyを実行する"],
     "desktop": [
         "画像を探してクリックする", "画像を探してマウス移動する", "座標をクリックする",
-        "文字列を入力する", "特殊キーを送信する",
+        "文字列を入力する", "特殊キーを送信する", "スクリーンショットを撮る",
+        "開いているウィンドウのタイトル一覧を見る", "ウィンドウをアクティブにする",
+        "ウィンドウサイズを指定する(タイトル指定)", "ウィンドウ位置を指定する(タイトル指定)",
     ],
     "text": [
         "文字を探して切り出す", "文字を置換する", "日付・時刻の一部を取得する",
@@ -1863,6 +1866,105 @@ class RecorderApp(_AppBase):
 
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
+        elif action == "ウィンドウサイズを指定する":
+            ttk.Label(
+                f, text="pyautoguiと併用する場合、ウィンドウサイズ・位置・表示倍率を"
+                        "固定しておくと座標がずれにくくなります。",
+                foreground="#557", justify="left",
+            ).pack(anchor="w", pady=(0, 6))
+            percent_field = BoolField(f, "画面全体に対する割合(%)で指定する(オフ=ピクセル指定)")
+            percent_field.pack(anchor="w", pady=2)
+            width_field = PlainField(f, "幅(空欄で変更しない)")
+            width_field.pack(fill="x", pady=4)
+            height_field = PlainField(f, "高さ(空欄で変更しない)")
+            height_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                use_percent = percent_field.get()
+                w_raw = width_field.get().strip()
+                h_raw = height_field.get().strip()
+                width = height = width_percent = height_percent = None
+                try:
+                    if use_percent:
+                        width_percent = float(w_raw) if w_raw else None
+                        height_percent = float(h_raw) if h_raw else None
+                    else:
+                        width = int(w_raw) if w_raw else None
+                        height = int(h_raw) if h_raw else None
+                except ValueError:
+                    self.log("⚠ 数字で入力してください")
+                    return
+                try:
+                    result = self.recorder.browser.set_window_size(
+                        width=width, height=height,
+                        width_percent=width_percent, height_percent=height_percent,
+                    )
+                    self.log(f"→ 設定できました: {result}")
+                    self.register_step({
+                        "handler": "browser", "action": "set_window_size",
+                        "params": {
+                            "width": width, "height": height,
+                            "width_percent": width_percent, "height_percent": height_percent,
+                        },
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "ウィンドウ位置を指定する":
+            ttk.Label(f, text="画面の左上を基準(0,0)として、右方向・下方向がプラスです。",
+                      foreground="#557").pack(anchor="w", pady=(0, 6))
+            x_field = PlainField(f, "X座標")
+            x_field.pack(fill="x", pady=4)
+            y_field = PlainField(f, "Y座標")
+            y_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                try:
+                    x, y = int(x_field.get()), int(y_field.get())
+                except ValueError:
+                    self.log("⚠ 数字で入力してください")
+                    return
+                try:
+                    result = self.recorder.browser.set_window_position(x, y)
+                    self.log(f"→ 設定できました: {result}")
+                    self.register_step({
+                        "handler": "browser", "action": "set_window_position",
+                        "params": {"x": x, "y": y},
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "表示倍率(ズーム)を指定する":
+            ttk.Label(
+                f, text="※ 別のページに遷移すると設定はリセットされます"
+                        "(維持したい場合は遷移のたびに登録し直してください)。",
+                foreground="#a55",
+            ).pack(anchor="w", pady=(0, 6))
+            percent_field = PlainField(f, "表示倍率(%。100=等倍)", default="100")
+            percent_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                try:
+                    percent = float(percent_field.get() or "100")
+                except ValueError:
+                    self.log("⚠ 数字で入力してください")
+                    return
+                try:
+                    result = self.recorder.browser.set_zoom(percent)
+                    self.log(f"→ 設定できました: {result}")
+                    self.register_step({
+                        "handler": "browser", "action": "set_zoom",
+                        "params": {"percent": percent},
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
     def _show_web_candidates(self) -> None:
         try:
             candidates = self.recorder.browser.list_interactive_texts()
@@ -2184,6 +2286,17 @@ class RecorderApp(_AppBase):
             slot_field = PlainField(f, "画像パスをスロットにする場合のスロット名(任意)")
             slot_field.pack(fill="x", pady=4)
 
+            region_enabled_field = BoolField(f, "検索範囲を画面全体ではなく特定の領域に絞る")
+            region_enabled_field.pack(anchor="w", pady=(8, 2))
+            region_left_field = PlainField(f, "領域の左端X(ピクセル)")
+            region_left_field.pack(fill="x", pady=2)
+            region_top_field = PlainField(f, "領域の上端Y(ピクセル)")
+            region_top_field.pack(fill="x", pady=2)
+            region_width_field = PlainField(f, "領域の幅(ピクセル)")
+            region_width_field.pack(fill="x", pady=2)
+            region_height_field = PlainField(f, "領域の高さ(ピクセル)")
+            region_height_field.pack(fill="x", pady=2)
+
             def on_submit():
                 image_path = img_field.get()
                 if not image_path:
@@ -2196,13 +2309,29 @@ class RecorderApp(_AppBase):
                 slot_name = slot_field.get().strip()
                 param_path = "{{" + slot_name + "}}" if slot_name else image_path
 
+                region = None
+                if region_enabled_field.get():
+                    try:
+                        region = [
+                            int(region_left_field.get()), int(region_top_field.get()),
+                            int(region_width_field.get()), int(region_height_field.get()),
+                        ]
+                    except ValueError:
+                        self.log("⚠ 領域は数字で入力してください")
+                        return
+
                 action_name = "locate_and_click" if is_click else "move_to_image"
                 try:
-                    getattr(self.recorder.desktop, action_name)(image_path, confidence=confidence, timeout=10)
+                    getattr(self.recorder.desktop, action_name)(
+                        image_path, confidence=confidence, timeout=10, region=region
+                    )
                     self.log("→ 画像を見つけて実行できました")
                     step = {
                         "handler": "desktop", "action": action_name,
-                        "params": {"image_path": param_path, "confidence": confidence, "timeout": 10},
+                        "params": {
+                            "image_path": param_path, "confidence": confidence,
+                            "timeout": 10, "region": region,
+                        },
                     }
                     if is_click:
                         verify_cfg = self._ask_verify(image_or_text_default=f"{image_path}|{confidence}", is_image=True)
@@ -2216,7 +2345,10 @@ class RecorderApp(_AppBase):
                     if self._confirm("未確認のままこの手順を登録しますか?"):
                         self.register_step({
                             "handler": "desktop", "action": action_name,
-                            "params": {"image_path": param_path, "confidence": confidence, "timeout": 10},
+                            "params": {
+                                "image_path": param_path, "confidence": confidence,
+                                "timeout": 10, "region": region,
+                            },
                         })
 
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
@@ -2277,6 +2409,165 @@ class RecorderApp(_AppBase):
                     self.recorder.desktop.press_key(key)
                     self.log(f"→ 送信できました: {key}")
                     self.register_step({"handler": "desktop", "action": "press_key", "params": {"key": key}})
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "スクリーンショットを撮る":
+            ttk.Label(
+                f, text="ここから対象のボタン/アイコン部分だけをトリミングして別ファイルに保存し、"
+                        "そのパスを「画像を探して...」の操作で指定してください。\n"
+                        "(このスクリーンショット取得自体はマクロの手順として登録されません)",
+                foreground="#557", justify="left",
+            ).pack(anchor="w", pady=(0, 6))
+            path_field = ValueSlotField(f, "保存先の画像パス")
+            path_field.add_button("参照...", lambda: path_field.browse_save_file(".png"))
+            path_field.pack(fill="x", pady=4)
+
+            region_enabled_field = BoolField(f, "画面全体ではなく特定の領域だけを撮影する")
+            region_enabled_field.pack(anchor="w", pady=(8, 2))
+            region_left_field = PlainField(f, "領域の左端X(ピクセル)")
+            region_left_field.pack(fill="x", pady=2)
+            region_top_field = PlainField(f, "領域の上端Y(ピクセル)")
+            region_top_field.pack(fill="x", pady=2)
+            region_width_field = PlainField(f, "領域の幅(ピクセル)")
+            region_width_field.pack(fill="x", pady=2)
+            region_height_field = PlainField(f, "領域の高さ(ピクセル)")
+            region_height_field.pack(fill="x", pady=2)
+
+            def on_submit():
+                test_v, _, _ = path_field.get()
+                region = None
+                if region_enabled_field.get():
+                    try:
+                        region = [
+                            int(region_left_field.get()), int(region_top_field.get()),
+                            int(region_width_field.get()), int(region_height_field.get()),
+                        ]
+                    except ValueError:
+                        self.log("⚠ 領域は数字で入力してください")
+                        return
+                try:
+                    self.recorder.desktop.take_screenshot(test_v, region=region)
+                    self.log(f"→ 保存できました: {test_v}")
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="撮影する(手順としては登録されません)", command=on_submit).pack(pady=6)
+
+        elif action == "開いているウィンドウのタイトル一覧を見る":
+            ttk.Label(
+                f, text="ウィンドウをアクティブにする/サイズ・位置を指定するときの"
+                        "目印探しに使います(この一覧取得自体は手順として登録されません)。",
+                foreground="#557", justify="left",
+            ).pack(anchor="w", pady=(0, 6))
+
+            def on_submit():
+                try:
+                    titles = self.recorder.desktop.list_window_titles()
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+                    return
+                if not titles:
+                    self.log("(今開いているウィンドウが見つかりませんでした)")
+                    return
+                for t in titles:
+                    self.log(f"  - {t}")
+
+            ttk.Button(f, text="一覧を表示する", command=on_submit).pack(pady=6)
+
+        elif action == "ウィンドウをアクティブにする":
+            title_field = ValueSlotField(f, "対象ウィンドウのタイトル(部分一致)")
+            title_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                title_test, title_param, _ = title_field.get()
+                try:
+                    self.recorder.desktop.activate_window_by_title(title_test)
+                    self.log(f"→ アクティブにできました: {title_test}")
+                    self.register_step({
+                        "handler": "desktop", "action": "activate_window_by_title",
+                        "params": {"title_hint": title_param},
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "ウィンドウサイズを指定する(タイトル指定)":
+            ttk.Label(
+                f, text="Excel/PDFビューア/エクスプローラー等、どのアプリケーションの"
+                        "ウィンドウでも部分一致するタイトルで指定できます。",
+                foreground="#557", justify="left",
+            ).pack(anchor="w", pady=(0, 6))
+            title_field = ValueSlotField(f, "対象ウィンドウのタイトル(部分一致)")
+            title_field.pack(fill="x", pady=4)
+            percent_field = BoolField(f, "画面全体に対する割合(%)で指定する(オフ=ピクセル指定)")
+            percent_field.pack(anchor="w", pady=2)
+            width_field = PlainField(f, "幅(空欄で変更しない)")
+            width_field.pack(fill="x", pady=4)
+            height_field = PlainField(f, "高さ(空欄で変更しない)")
+            height_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                title_test, title_param, _ = title_field.get()
+                use_percent = percent_field.get()
+                w_raw = width_field.get().strip()
+                h_raw = height_field.get().strip()
+                width = height = width_percent = height_percent = None
+                try:
+                    if use_percent:
+                        width_percent = float(w_raw) if w_raw else None
+                        height_percent = float(h_raw) if h_raw else None
+                    else:
+                        width = int(w_raw) if w_raw else None
+                        height = int(h_raw) if h_raw else None
+                except ValueError:
+                    self.log("⚠ 数字で入力してください")
+                    return
+                try:
+                    result = self.recorder.desktop.set_window_size_by_title(
+                        title_test, width=width, height=height,
+                        width_percent=width_percent, height_percent=height_percent,
+                    )
+                    self.log(f"→ 設定できました: {result}")
+                    self.register_step({
+                        "handler": "desktop", "action": "set_window_size_by_title",
+                        "params": {
+                            "title_hint": title_param, "width": width, "height": height,
+                            "width_percent": width_percent, "height_percent": height_percent,
+                        },
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "ウィンドウ位置を指定する(タイトル指定)":
+            ttk.Label(f, text="画面の左上を基準(0,0)として、右方向・下方向がプラスです。",
+                      foreground="#557").pack(anchor="w", pady=(0, 6))
+            title_field = ValueSlotField(f, "対象ウィンドウのタイトル(部分一致)")
+            title_field.pack(fill="x", pady=4)
+            x_field = PlainField(f, "X座標")
+            x_field.pack(fill="x", pady=4)
+            y_field = PlainField(f, "Y座標")
+            y_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                title_test, title_param, _ = title_field.get()
+                try:
+                    x, y = int(x_field.get()), int(y_field.get())
+                except ValueError:
+                    self.log("⚠ 数字で入力してください")
+                    return
+                try:
+                    result = self.recorder.desktop.set_window_position_by_title(title_test, x, y)
+                    self.log(f"→ 設定できました: {result}")
+                    self.register_step({
+                        "handler": "desktop", "action": "set_window_position_by_title",
+                        "params": {"title_hint": title_param, "x": x, "y": y},
+                    })
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
 

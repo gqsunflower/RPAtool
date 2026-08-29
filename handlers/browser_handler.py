@@ -171,6 +171,66 @@ class BrowserHandler:
         logger.info("登録サイトを開きました: %s (タブ=%s, %s)", site_key, tab_alias, driver.current_url)
         return driver.current_url
 
+    # ---------- ウィンドウサイズ・位置・表示倍率(pyautogui併用時の座標合わせ用) ----------
+    # pyautoguiは画面上の絶対座標で操作するため、ブラウザのウィンドウサイズ・位置・
+    # 表示倍率が実行のたびに変わると、記録した画像/座標がずれて動かなくなる。
+    # ここでこれらを固定しておくことで、pyautoguiとの併用を安定させる。
+
+    def get_screen_size(self) -> dict:
+        """OSの画面解像度(モニタ全体のピクセル数)を取得する。
+        set_window_sizeで相対値(%)を指定する際の基準にもなる。
+        """
+        driver = self._get_driver()
+        size = driver.execute_script("return {width: window.screen.width, height: window.screen.height};")
+        return {"width": int(size["width"]), "height": int(size["height"])}
+
+    def set_window_size(
+        self,
+        width: int | None = None,
+        height: int | None = None,
+        width_percent: float | None = None,
+        height_percent: float | None = None,
+    ) -> str:
+        """ブラウザのウィンドウサイズを指定する。width/height はピクセル指定。
+        width_percent/height_percent は画面全体(モニタの解像度)に対する
+        割合(0〜100%)で指定する相対値で、指定するとピクセル指定より優先される。
+        どちらも指定しなかった軸は変更しない。
+        """
+        driver = self._get_driver()
+        if width_percent is not None or height_percent is not None:
+            screen = self.get_screen_size()
+            if width_percent is not None:
+                width = round(screen["width"] * width_percent / 100)
+            if height_percent is not None:
+                height = round(screen["height"] * height_percent / 100)
+        current = driver.get_window_size()
+        final_width = int(width) if width is not None else current["width"]
+        final_height = int(height) if height is not None else current["height"]
+        driver.set_window_size(final_width, final_height)
+        logger.info("ウィンドウサイズを設定しました: %dx%d", final_width, final_height)
+        return f"{final_width}x{final_height}"
+
+    def set_window_position(self, x: int, y: int) -> str:
+        """ブラウザのウィンドウ位置を指定する。基準点は画面の左上(0,0)で、
+        右方向がx増加、下方向がy増加(Windowsの画面座標と同じ)。
+        """
+        driver = self._get_driver()
+        driver.set_window_position(int(x), int(y))
+        logger.info("ウィンドウ位置を設定しました: (%d, %d)", x, y)
+        return f"({x}, {y})"
+
+    def set_zoom(self, percent: float = 100) -> str:
+        """ページの表示倍率を変更する(100=等倍)。pyautoguiの画像検索の精度を
+        上げたい(要素を大きく表示したい)場合等に使う。ブラウザ本体の
+        Ctrl+スクロールズームと違い、CSSの`zoom`プロパティで実現しているため、
+        別ページに遷移すると設定はリセットされる(維持したい場合はページ遷移の
+        たびに再度このステップを実行すること)。
+        """
+        driver = self._get_driver()
+        driver.execute_script("document.body.style.zoom = arguments[0] + '%';", percent)
+        logger.info("表示倍率を設定しました: %s%%", percent)
+        return f"{percent}%"
+
     def switch_to_tab(self, tab_alias: str) -> str:
         """既に開いている複数のタブの中から、以降の操作対象(アクティブタブ)を切り替える。"""
         if tab_alias not in self._tab_handles:
@@ -578,44 +638,92 @@ class BrowserHandler:
         return [el.text.strip() for el in elements]
 
     def _find_checkbox_like(self, label_hint: str):
+        """ラベルの表示文字を手がかりにチェックボックス本体(<input type=checkbox>)を探す。
+
+        デザイン上、本体のinputを `opacity:0` や `width/height:0` で見た目上
+        完全に隠し、`::before`/`::after`等の疑似要素で「四角にチェックが入る」
+        見た目だけを描く実装がよくある(Bootstrapのカスタムチェックボックス等)。
+        この場合Seleniumの is_displayed() は False を返す(要素は実在するが
+        見た目のサイズが無いため)。ここでは意図的に is_displayed() では
+        絞り込まず、DOM上に実在するかどうかだけで判定する(疑似要素自体は
+        DOMノードではないためSeleniumから直接操作できないが、紐づく本体の
+        inputは実在するのでそちらを操作対象にする)。
+        戻り値: (checkbox_input, clickable_element)。clickable_elementは
+        実際にクリックを試す対象(<label>があればそちらを優先。無ければinput自身)。
+        """
         from selenium.webdriver.common.by import By
         from selenium.common.exceptions import NoSuchElementException
 
         driver = self._get_driver()
-        candidates = self._find_visible(self._build_input_xpath(label_hint, "input"))
-        checkboxes = [el for el in candidates if el.get_attribute("type") == "checkbox"]
+
+        def _label_for(checkbox):
+            cb_id = checkbox.get_attribute("id")
+            if cb_id:
+                try:
+                    return driver.find_element(By.XPATH, f"//label[@for={_xpath_literal(cb_id)}]")
+                except NoSuchElementException:
+                    pass
+            try:
+                return checkbox.find_element(By.XPATH, "ancestor::label[1]")
+            except NoSuchElementException:
+                return None
+
+        all_inputs = driver.find_elements(By.XPATH, self._build_input_xpath(label_hint, "input"))
+        checkboxes = [el for el in all_inputs if el.get_attribute("type") == "checkbox"]
         if checkboxes:
-            return checkboxes[0]
+            cb = checkboxes[0]
+            return cb, (_label_for(cb) or cb)
 
         lit = _xpath_literal(label_hint)
         labels = driver.find_elements(By.XPATH, f"//label[contains(normalize-space(.), {lit})]")
         for lbl in labels:
+            cb = None
             for_id = lbl.get_attribute("for")
             if for_id:
                 try:
-                    el = driver.find_element(By.ID, for_id)
-                    if el.is_displayed() and el.get_attribute("type") == "checkbox":
-                        return el
+                    candidate = driver.find_element(By.ID, for_id)
+                    if candidate.get_attribute("type") == "checkbox":
+                        cb = candidate
                 except NoSuchElementException:
                     pass
-            try:
-                el = lbl.find_element(By.XPATH, ".//input[@type='checkbox']")
-                if el.is_displayed():
-                    return el
-            except NoSuchElementException:
-                continue
+            if cb is None:
+                try:
+                    cb = lbl.find_element(By.XPATH, ".//input[@type='checkbox']")
+                except NoSuchElementException:
+                    continue
+            return cb, lbl
         return None
 
     def check_checkbox_by_text(self, label_hint: str, checked: bool = True) -> str:
         """ラベルの表示文字を手がかりにチェックボックスを探し、指定した状態
         (checked)に合わせる(既に希望の状態ならクリックしない)。
+
+        本体のinputが見た目上隠されているカスタムデザインのチェックボックス
+        (::before等で描画する類)にも対応するため、まず紐づく<label>への
+        通常クリックを試し、それが失敗する場合はJavaScriptで直接
+        input側の.click()を発火させる(座標ベースの操作ではないため、
+        見た目のサイズ・位置に関わらず確実に状態を切り替えられる)。
         """
         self._assert_still_on_site()
-        target = self._find_checkbox_like(label_hint)
-        if target is None:
+        found = self._find_checkbox_like(label_hint)
+        if found is None:
             raise ElementNotFoundError(f"'{label_hint}' に一致するチェックボックスが見つかりませんでした")
-        if target.is_selected() != checked:
-            target.click()
+        checkbox, clickable = found
+
+        if checkbox.is_selected() != checked:
+            driver = self._get_driver()
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", clickable)
+                clickable.click()
+            except Exception:  # noqa: BLE001
+                pass
+            if checkbox.is_selected() != checked:
+                driver.execute_script("arguments[0].click();", checkbox)
+
+        if checkbox.is_selected() != checked:
+            raise VerificationFailedError(
+                f"'{label_hint}' のチェック状態を {checked} に変更できませんでした"
+            )
         self._assert_still_on_site()
         return f"checkbox '{label_hint}' -> {checked}"
 

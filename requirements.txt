@@ -26,6 +26,11 @@ pdf2image>=1.17
 pyautogui>=0.9
 opencv-python>=4.9
 
+# デスクトップ操作で、Excel/PDFビューア/エクスプローラー等どのアプリケーションの
+# ウィンドウでも、タイトルを手がかりにサイズ・位置の指定やアクティブ化を行う
+# (*_by_title系のアクション)ために必要。pyautoguiの画像検索・クリック自体には不要。
+pygetwindow>=0.0.9
+
 # GUI版レコーダー(gui_recorder.py)のクリップボード画像貼り付け・プレビュー表示に必要。
 # tkinter自体はPython標準ですが、環境によっては別途OSパッケージが必要な場合があります
 # (例: Ubuntu/Debianで `sudo apt install python3-tk`)。

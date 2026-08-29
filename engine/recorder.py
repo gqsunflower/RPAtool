@@ -1424,6 +1424,9 @@ class MacroRecorder:
             print("  7) 画面から属性値を読み取る(href/value等、CSSセレクタ指定)")
             print("  8) 画面から文字のリストを読み取る(表の1列など、CSSセレクタ指定)")
             print("  9) チェックボックスをON/OFFする")
+            print("  10) ウィンドウサイズを指定する(pyautogui併用時の座標合わせ用)")
+            print("  11) ウィンドウ位置を指定する(pyautogui併用時の座標合わせ用)")
+            print("  12) 表示倍率(ズーム)を指定する")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -1446,10 +1449,98 @@ class MacroRecorder:
                 self._record_get_text_list_by_selector()
             elif choice == "9":
                 self._record_check_checkbox()
+            elif choice == "10":
+                self._record_set_window_size()
+            elif choice == "11":
+                self._record_set_window_position()
+            elif choice == "12":
+                self._record_set_zoom()
             elif choice == "0":
                 return
             else:
-                print("0〜9のいずれかを入力してください。\n")
+                print("0〜12のいずれかを入力してください。\n")
+
+    def _record_set_window_size(self) -> None:
+        print("  ピクセルで指定するか、画面全体に対する割合(%)で指定するか選べます。")
+        print("  割合を指定した場合はそちらが優先されます。")
+        mode = self._ask("  割合(%)で指定しますか? (y/N): ").strip().lower()
+        width = height = width_percent = height_percent = None
+        if mode == "y":
+            try:
+                screen = self.browser.get_screen_size()
+                print(f"  (参考: 画面解像度 {screen['width']}x{screen['height']})")
+            except Exception:  # noqa: BLE001
+                pass
+            w_raw = self._ask("  幅の割合(%。空欄で変更しない): ").strip()
+            h_raw = self._ask("  高さの割合(%。空欄で変更しない): ").strip()
+            width_percent = float(w_raw) if w_raw else None
+            height_percent = float(h_raw) if h_raw else None
+        else:
+            w_raw = self._ask("  幅(ピクセル。空欄で変更しない): ").strip()
+            h_raw = self._ask("  高さ(ピクセル。空欄で変更しない): ").strip()
+            width = int(w_raw) if w_raw.isdigit() else None
+            height = int(h_raw) if h_raw.isdigit() else None
+
+        try:
+            result = self.browser.set_window_size(
+                width=width, height=height, width_percent=width_percent, height_percent=height_percent
+            )
+            print(f"  → 実際に設定できました: {result}")
+            self.steps.append({
+                "handler": "browser", "action": "set_window_size",
+                "params": {
+                    "width": width, "height": height,
+                    "width_percent": width_percent, "height_percent": height_percent,
+                },
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+
+    def _record_set_window_position(self) -> None:
+        print("  画面の左上を基準(0,0)として、右方向・下方向がプラスです。")
+        x_raw = self._ask("  X座標(間違えた場合は「キャンセル」): ")
+        if x_raw in CANCEL_WORDS:
+            print("  → キャンセルしました。\n")
+            return
+        y_raw = self._ask("  Y座標: ")
+        try:
+            x, y = int(x_raw), int(y_raw)
+        except ValueError:
+            print("  数字で入力してください。\n")
+            return
+
+        try:
+            result = self.browser.set_window_position(x, y)
+            print(f"  → 実際に設定できました: {result}")
+            self.steps.append({
+                "handler": "browser", "action": "set_window_position",
+                "params": {"x": x, "y": y},
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+
+    def _record_set_zoom(self) -> None:
+        print("  ※ 別のページに遷移すると設定はリセットされます"
+              "(維持したい場合は遷移のたびに登録し直してください)。")
+        raw = self._ask("  表示倍率を%で入力してください(空Enterで100=等倍): ").strip()
+        try:
+            percent = float(raw) if raw else 100.0
+        except ValueError:
+            print("  数字で入力してください。\n")
+            return
+
+        try:
+            result = self.browser.set_zoom(percent)
+            print(f"  → 実際に設定できました: {result}")
+            self.steps.append({
+                "handler": "browser", "action": "set_zoom",
+                "params": {"percent": percent},
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
 
     def _record_get_text_by_selector(self) -> None:
         print("  F12の開発者ツールで調べたCSSセレクタ(class/id等)を指定してください。")
@@ -2157,6 +2248,10 @@ class MacroRecorder:
             print("  4) 文字列をキーボード入力する")
             print("  5) 特殊キーを送信する(例: enter, tab, ctrl+s)")
             print("  6) 今の画面のスクリーンショットを撮る(画像素材の準備用)")
+            print("  7) 開いているウィンドウのタイトル一覧を見る(目印探し用)")
+            print("  8) ウィンドウをアクティブにする(タイトル指定。Excel/PDF/エクスプローラー等)")
+            print("  9) ウィンドウサイズを指定する(タイトル指定)")
+            print("  10) ウィンドウ位置を指定する(タイトル指定)")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -2173,10 +2268,118 @@ class MacroRecorder:
                 self._record_desktop_press_key()
             elif choice == "6":
                 self._record_desktop_screenshot()
+            elif choice == "7":
+                self._record_desktop_list_titles()
+            elif choice == "8":
+                self._record_desktop_activate_window()
+            elif choice == "9":
+                self._record_desktop_set_window_size()
+            elif choice == "10":
+                self._record_desktop_set_window_position()
             elif choice == "0":
                 return
             else:
-                print("0〜6のいずれかを入力してください。\n")
+                print("0〜10のいずれかを入力してください。\n")
+
+    def _record_desktop_list_titles(self) -> None:
+        try:
+            titles = self.desktop.list_window_titles()
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+            return
+        if not titles:
+            print("  (今開いているウィンドウが見つかりませんでした)\n")
+            return
+        print("  今開いているウィンドウのタイトル:")
+        for t in titles:
+            print(f"    - {t}")
+        print("  (この一覧取得自体はマクロの手順として登録されません)\n")
+
+    def _record_desktop_activate_window(self) -> None:
+        result = self._ask_sluttable_value("アクティブにしたいウィンドウのタイトル(部分一致)")
+        if result is None:
+            print("  → キャンセルしました。\n")
+            return
+        test_value, param_value = result
+        try:
+            self.desktop.activate_window_by_title(test_value)
+            print(f"  → 実際にアクティブにできました: {test_value}")
+            self.steps.append({
+                "handler": "desktop", "action": "activate_window_by_title",
+                "params": {"title_hint": param_value},
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+
+    def _record_desktop_set_window_size(self) -> None:
+        result = self._ask_sluttable_value("対象ウィンドウのタイトル(部分一致。Excel/PDF/エクスプローラー等)")
+        if result is None:
+            print("  → キャンセルしました。\n")
+            return
+        test_value, param_value = result
+
+        mode = self._ask("  割合(%)で指定しますか? (y/N): ").strip().lower()
+        width = height = width_percent = height_percent = None
+        if mode == "y":
+            try:
+                screen = self.desktop.get_screen_size()
+                print(f"  (参考: 画面解像度 {screen['width']}x{screen['height']})")
+            except Exception:  # noqa: BLE001
+                pass
+            w_raw = self._ask("  幅の割合(%。空欄で変更しない): ").strip()
+            h_raw = self._ask("  高さの割合(%。空欄で変更しない): ").strip()
+            width_percent = float(w_raw) if w_raw else None
+            height_percent = float(h_raw) if h_raw else None
+        else:
+            w_raw = self._ask("  幅(ピクセル。空欄で変更しない): ").strip()
+            h_raw = self._ask("  高さ(ピクセル。空欄で変更しない): ").strip()
+            width = int(w_raw) if w_raw.isdigit() else None
+            height = int(h_raw) if h_raw.isdigit() else None
+
+        try:
+            result_msg = self.desktop.set_window_size_by_title(
+                test_value, width=width, height=height,
+                width_percent=width_percent, height_percent=height_percent,
+            )
+            print(f"  → 実際に設定できました: {result_msg}")
+            self.steps.append({
+                "handler": "desktop", "action": "set_window_size_by_title",
+                "params": {
+                    "title_hint": param_value, "width": width, "height": height,
+                    "width_percent": width_percent, "height_percent": height_percent,
+                },
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+
+    def _record_desktop_set_window_position(self) -> None:
+        result = self._ask_sluttable_value("対象ウィンドウのタイトル(部分一致。Excel/PDF/エクスプローラー等)")
+        if result is None:
+            print("  → キャンセルしました。\n")
+            return
+        test_value, param_value = result
+
+        print("  画面の左上を基準(0,0)として、右方向・下方向がプラスです。")
+        x_raw = self._ask("  X座標: ")
+        y_raw = self._ask("  Y座標: ")
+        try:
+            x, y = int(x_raw), int(y_raw)
+        except ValueError:
+            print("  数字で入力してください。\n")
+            return
+
+        try:
+            result_msg = self.desktop.set_window_position_by_title(test_value, x, y)
+            print(f"  → 実際に設定できました: {result_msg}")
+            self.steps.append({
+                "handler": "desktop", "action": "set_window_position_by_title",
+                "params": {"title_hint": param_value, "x": x, "y": y},
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
 
     def _ask_desktop_verification(self, default_image_path: str, default_confidence: float) -> dict:
         print("  この操作が『本当に成功したか』をどう確認しますか?")
@@ -2200,14 +2403,42 @@ class MacroRecorder:
                 }
         return {"type": "none"}
 
+    def _ask_desktop_region(self) -> list[int] | None:
+        """画像検索の対象を画面全体にするか、特定の矩形領域だけに絞るかを聞く。
+        領域を絞ると、似たような画像が画面の他の場所にもある場合の誤検出を
+        防げるほか、検索範囲が狭まる分わずかに速くなる。
+        """
+        try:
+            screen = self.desktop.get_screen_size()
+            print(f"  (参考: 画面解像度 {screen['width']}x{screen['height']})")
+        except Exception:  # noqa: BLE001
+            pass
+        choice = self._ask(
+            "  検索範囲は画面全体でよいですか? "
+            "特定の領域だけに絞る場合は「領域」と入力してください(空Enterで画面全体): "
+        ).strip()
+        if choice not in ("領域", "region"):
+            return None
+        print("  領域の左上を基準(0,0)として、幅・高さをピクセルで指定してください。")
+        try:
+            left = int(self._ask("  領域の左端のX座標: "))
+            top = int(self._ask("  領域の上端のY座標: "))
+            width = int(self._ask("  領域の幅(ピクセル): "))
+            height = int(self._ask("  領域の高さ(ピクセル): "))
+        except ValueError:
+            print("  数字で入力してください。画面全体を対象にします。\n")
+            return None
+        return [left, top, width, height]
+
     def _record_desktop_screenshot(self) -> None:
         result = self._ask_sluttable_value("保存先の画像パス")
         if result is None:
             print("  → キャンセルしました。\n")
             return
         test_value, _ = result
+        region = self._ask_desktop_region()
         try:
-            self.desktop.take_screenshot(test_value)
+            self.desktop.take_screenshot(test_value, region=region)
             print(f"  → スクリーンショットを保存しました: {test_value}")
             print("  → ここから対象のボタン/アイコン部分だけをトリミングして別ファイルに")
             print("     保存し、そのパスを「画像を探して...」の操作で指定してください。")
@@ -2231,15 +2462,18 @@ class MacroRecorder:
             confidence = float(conf_raw) if conf_raw else 0.8
         except ValueError:
             confidence = 0.8
+        region = self._ask_desktop_region()
 
         try:
-            self.desktop.locate_and_click(test_value, confidence=confidence, timeout=10)
+            self.desktop.locate_and_click(test_value, confidence=confidence, timeout=10, region=region)
             print("  → 実際に画像を見つけてクリックできました。")
             verify_cfg = self._ask_desktop_verification(test_value, confidence)
             retry_cfg = self._ask_retry()
             self.steps.append({
                 "handler": "desktop", "action": "locate_and_click",
-                "params": {"image_path": param_value, "confidence": confidence, "timeout": 10},
+                "params": {
+                    "image_path": param_value, "confidence": confidence, "timeout": 10, "region": region,
+                },
                 "verify": verify_cfg, "verify_skip": False,
                 "retry": retry_cfg,
             })
@@ -2249,7 +2483,9 @@ class MacroRecorder:
             if self._ask("  それでもこの手順として登録しますか? (y/N): ").lower() == "y":
                 self.steps.append({
                     "handler": "desktop", "action": "locate_and_click",
-                    "params": {"image_path": param_value, "confidence": confidence, "timeout": 10},
+                    "params": {
+                        "image_path": param_value, "confidence": confidence, "timeout": 10, "region": region,
+                    },
                 })
                 print("  → 未確認のまま登録しました。\n")
             else:
@@ -2269,14 +2505,17 @@ class MacroRecorder:
             confidence = float(conf_raw) if conf_raw else 0.8
         except ValueError:
             confidence = 0.8
+        region = self._ask_desktop_region()
 
         try:
-            self.desktop.move_to_image(test_value, confidence=confidence, timeout=10)
+            self.desktop.move_to_image(test_value, confidence=confidence, timeout=10, region=region)
             print("  → 実際に画像を見つけてマウスを移動できました。")
             retry_cfg = self._ask_retry()
             self.steps.append({
                 "handler": "desktop", "action": "move_to_image",
-                "params": {"image_path": param_value, "confidence": confidence, "timeout": 10},
+                "params": {
+                    "image_path": param_value, "confidence": confidence, "timeout": 10, "region": region,
+                },
                 "retry": retry_cfg,
             })
             print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
