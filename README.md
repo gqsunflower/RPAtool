@@ -721,7 +721,43 @@ MacroExecutor (engine/executor.py)
 pip install -r requirements.txt
 ```
 
-ブラウザ操作にはローカルにChromeとChromeDriver(またはSeleniumManagerが自動取得)が必要です。
+### 必須ライブラリ
+
+これらが無いと基本機能(Excel/PDF/Web)が動きません。
+
+| ライブラリ | 用途 |
+|---|---|
+| `openpyxl` | Excel(`.xlsx`/`.xlsm`)の読み書き |
+| `pdfplumber` | PDFのテキスト抽出・範囲指定テキスト・表抽出 |
+| `pypdf` | PDFの結合・分割・回転・埋め込み画像抽出 |
+| `selenium` | Webブラウザ操作 |
+
+### 機能ごとに必要な追加ライブラリ(任意)
+
+使わない機能があればインストール不要です。未インストールでも、該当機能を使わない限りエラーにはなりません。
+
+| ライブラリ | 用途 | 備考 |
+|---|---|---|
+| `pywin32` | Excelの「PDFとして保存」/`.xlsm`内VBAマクロの実行 | **Windows + Excel本体インストール環境専用**(pipだけではExcel本体は入りません) |
+| `pytesseract` / `pdf2image` | PDFのOCR(`ocr_pdf_to_text`、範囲指定テキストのOCR) | OS側にTesseract OCR本体とPopplerの別途インストールが必要(下記) |
+| `pyautogui` | デスクトップ操作(画面上の画像を探してクリック・マウス移動・キー入力) | |
+| `opencv-python` | pyautoguiのあいまい一致(confidence指定) | 未インストールでも完全一致でのみ動作 |
+| `pygetwindow` | ウィンドウのサイズ・位置指定・アクティブ化(`*_by_title`系。Excel/PDFビューア/エクスプローラー等) | pyautoguiの画像検索・クリック自体には不要 |
+| `Pillow` | GUI版レコーダーのクリップボード画像貼り付け・プレビュー表示 | |
+| `tkinterdnd2` | GUI版レコーダーでのファイル/フォルダのドラッグ&ドロップ入力 | 未インストールでもD&Dが使えないだけで「参照...」ボタン等は使える |
+| `pyperclip` | テキスト加工の「クリップボードにコピー/取得する」 | |
+
+**OS側に別途インストールが必要なもの(pipだけでは入りません)**:
+
+- **Chrome + ChromeDriver**: Web操作に必須(ChromeDriverはSeleniumManagerが自動取得することが多いですが、環境によっては手動導入が必要です)
+- **Tesseract OCR + Poppler**(OCR機能を使う場合のみ):
+  - Windows: 公式インストーラでTesseract-OCR・Popplerを導入し、PATHを通す
+  - macOS: `brew install tesseract tesseract-lang poppler`
+  - Ubuntu/Debian: `apt install tesseract-ocr tesseract-ocr-jpn poppler-utils`
+- **xclip / xsel / wl-paste**(Linuxでクリップボード機能・GUI版のクリップボード画像貼り付けを使う場合のみ)
+- **python3-tk**(Linuxで、GUI版レコーダーのTkinterが標準では入っていない場合。例: `apt install python3-tk`)
+- **python3-xlib**(Linuxでpyautoguiのデスクトップ操作を使う場合、追加で必要になることがあります)
+- macOSでデスクトップ操作(pyautogui)を使う場合、「システム設定 > プライバシーとセキュリティ > アクセシビリティ / 画面収録」で実行しているターミナル/Pythonへのアクセス許可が必要です
 
 ログイン情報はコードやJSONに直書きせず、環境変数で渡します。
 
