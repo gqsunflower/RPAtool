@@ -79,6 +79,14 @@ start_step で指定した番号のステップから実行を開始できます
      "store_as":"A"}
     値を計算して変数へ再代入する(A=A+1 に相当)。store_asは既存のパイプ
     ライン機構と同じで、既存の変数名を指定すればその変数を上書きできる。
+  - {"handler":"control","action":"to_str","params":{"value":"{{A}}"},"store_as":"A"}
+    {"handler":"control","action":"to_int","params":{"value":"{{A}}"},"store_as":"A"}
+    {"handler":"control","action":"to_float","params":{"value":"{{A}}"},"store_as":"A"}
+    変数の型を強制的に変換する。Excelのセル値等は先頭が0の値(郵便番号等)を
+    そのまま保持するため基本的に文字列として取得されるが、計算に使いたい
+    ときはto_int/to_floatで明示的に数値へ変換できる(int変換は小数点以下を
+    切り捨てるのではなく一度floatを経由するため、"3.0"のような文字列も
+    to_intで3に変換できる。"3.5"のような値をto_intすると3になる)。
   - {"handler":"control","action":"for_start",
      "params":{"var":"i","start":0,"end":"{{mylist.length-1}}"}}
     〜
@@ -117,6 +125,24 @@ _RE_LENGTH_ARITH = re.compile(r"^(\w+)\.length\s*([+\-])\s*(\d+(?:\.\d+)?)$")
 _RE_INDEX = re.compile(r"^(\w+)\[(\w+)\]$")
 _RE_ARITH = re.compile(r"^(\w+)\s*([+\-])\s*(\d+(?:\.\d+)?)$")
 _RE_PLAIN = re.compile(r"^(\w+)$")
+_RE_COLUMN_LETTERS = re.compile(r"^[A-Za-z]*$")  # 空文字列は「A列より前」を表す特殊値として許容
+
+
+def _column_letters_to_index(letters: str) -> int:
+    """Excelの列文字("A","B",...,"Z","AA",...)を1始まりの列番号に変換する。"""
+    idx = 0
+    for ch in letters.upper():
+        idx = idx * 26 + (ord(ch) - ord("A") + 1)
+    return idx
+
+
+def _column_index_to_letters(index: int) -> str:
+    """1始まりの列番号をExcelの列文字に変換する(_column_letters_to_indexの逆変換)。"""
+    letters = ""
+    while index > 0:
+        index, rem = divmod(index - 1, 26)
+        letters = chr(rem + ord("A")) + letters
+    return letters
 
 
 class MacroEditRequested(Exception):
@@ -188,11 +214,22 @@ def _parse_var_expr(expr: str, slots: dict) -> Any:
         key, op, operand = m.group(1), m.group(2), m.group(3)
         if key not in slots:
             raise KeyError(f"未解決のスロットです: {key}")
+        value = slots[key]
+        if isinstance(value, str) and _RE_COLUMN_LETTERS.match(value):
+            # Excelの列文字("A","B",...,"Z","AA",...)に対する+N/-N演算。
+            # 例: get_last_columnで取得した列文字を{{last_col+1}}のように
+            # 使うと、その1つ右の列文字が得られる(A1形式のセル参照組み立て用)。
+            idx = _column_letters_to_index(value)
+            delta = int(float(operand))
+            new_idx = idx + delta if op == "+" else idx - delta
+            if new_idx < 1:
+                raise ValueError(f"'{key}'({value})から{op}{operand}すると列がA列より前になります")
+            return _column_index_to_letters(new_idx)
         try:
-            num = float(slots[key])
+            num = float(value)
         except (TypeError, ValueError) as e:
             raise ValueError(
-                f"'{key}' の値 {slots[key]!r} は数値ではないため、{op}{operand} の計算ができません"
+                f"'{key}' の値 {value!r} は数値ではないため、{op}{operand} の計算ができません"
             ) from e
         result = num + float(operand) if op == "+" else num - float(operand)
         return int(result) if result == int(result) else result
@@ -223,6 +260,12 @@ def _substitute(value: Any, slots: dict) -> Any:
       付けると、リストの要素をPythonと同じ0始まりの番号で取得できる
       (角括弧の中は数字でも、iのような別の変数名でも良い)。
     - "{{mylist.length}}" でリストの要素数を取得できる。
+    - "{{last_col+1}}" のように、変数の値がExcelの列文字("A","B",...)の
+      場合は列文字としての+N/-N演算になる(1つ右/左の列文字を返す)。
+
+    dictの値だけでなく**キー**も同じルールで置換する。これは
+    Excelのcell_values(例: {"B{{last_row+1}}": "値"})のように、
+    セル参照そのものを前の手順の結果から組み立てたい場合に使う。
     """
     if isinstance(value, str):
         matches = list(_VAR_PATTERN.finditer(value))
@@ -239,7 +282,10 @@ def _substitute(value: Any, slots: dict) -> Any:
 
         return _VAR_PATTERN.sub(_replace, value)
     if isinstance(value, dict):
-        return {k: _substitute(v, slots) for k, v in value.items()}
+        return {
+            (_substitute(k, slots) if isinstance(k, str) else k): _substitute(v, slots)
+            for k, v in value.items()
+        }
     if isinstance(value, list):
         return [_substitute(v, slots) for v in value]
     return value
@@ -453,6 +499,30 @@ class MacroExecutor:
                     if self.run_logger:
                         self.run_logger.log(
                             macro_name, i, "control", "set_value", "success", str(value)[:200]
+                        )
+                    i += 1
+                    continue
+
+                if action_name in ("to_str", "to_int", "to_float"):
+                    value = _substitute(raw_params.get("value"), combined)
+                    try:
+                        if action_name == "to_str":
+                            converted: Any = str(value)
+                        elif action_name == "to_int":
+                            converted = int(float(value))
+                        else:
+                            converted = float(value)
+                    except (TypeError, ValueError) as e:
+                        raise ValueError(
+                            f"ステップ{i}: {value!r} を{action_name}で変換できません: {e}"
+                        ) from e
+                    store_as = step.get("store_as")
+                    if store_as:
+                        variables[store_as] = converted
+                    results.append(converted)
+                    if self.run_logger:
+                        self.run_logger.log(
+                            macro_name, i, "control", action_name, "success", str(converted)[:200]
                         )
                     i += 1
                     continue

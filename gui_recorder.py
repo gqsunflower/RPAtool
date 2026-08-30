@@ -24,6 +24,11 @@ import tkinter as tk
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
+from typing import Any
+
+from openpyxl.utils import column_index_from_string, get_column_letter
+
+_NO_VALUE = object()  # register_stepでvalue未指定を表す番人値(Noneも正当な値のため)
 
 BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR))
@@ -67,7 +72,7 @@ DOMAIN_ACTIONS = {
         "印刷範囲を指定する", "新規シートを追加する", "シート名を変更する",
         "セル範囲(1列/1行)をリストとして取得する",
         "値でセルを検索する", "表の末尾に1行追記する", "行を挿入する", "行を削除する",
-        "セル範囲の値を空にする", "シートを削除する",
+        "セル範囲の値を空にする", "シートを削除する", "最終列を取得する",
     ],
     "pdf": [
         "テキストを抽出する(ページ全体)", "複数PDFを結合する", "PDFを分割する",
@@ -96,7 +101,7 @@ DOMAIN_ACTIONS = {
         "ウィンドウサイズを指定する(タイトル指定)", "ウィンドウ位置を指定する(タイトル指定)",
     ],
     "text": [
-        "文字を探して切り出す", "文字を置換する", "日付・時刻の一部を取得する",
+        "文字を探して切り出す", "文字を置換する", "日付・時刻を取得する",
         "文字をつなげる/付加する", "クリップボードにコピーする", "クリップボードから取得する",
     ],
     "list": [
@@ -107,6 +112,7 @@ DOMAIN_ACTIONS = {
         "ラベルを置く", "指定したラベルへジャンプする(goto)",
         "条件を満たしたらジャンプする(IF文)", "変数に値を設定する",
         "繰り返しを開始する(for)", "繰り返しを終了する(next)",
+        "変数の型を変換する(文字列/整数/小数)",
     ],
 }
 
@@ -153,6 +159,16 @@ def enable_path_drop(widget, on_path) -> None:
             on_path(paths[0])
 
     widget.dnd_bind("<<Drop>>", _on_drop)
+
+
+def _offset_template(var_name: str, offset: int) -> str:
+    """{{var_name}} に対するオフセット付きテンプレート文字列を組み立てる。
+    offset=0なら "{{var_name}}"、それ以外は "{{var_name+N}}"/"{{var_name-N}}"。
+    """
+    if offset == 0:
+        return "{{" + var_name + "}}"
+    sign = "+" if offset > 0 else "-"
+    return "{{" + var_name + sign + str(abs(offset)) + "}}"
 
 
 def grab_clipboard_image(save_dir: Path) -> str | None:
@@ -409,7 +425,7 @@ class RecorderApp(_AppBase):
     def __init__(self):
         super().__init__()
         self.title("疑似ローカルAI — 操作の登録 (GUI)")
-        self.geometry("880x760")
+        self.geometry("1140x760")
 
         self.recorder = MacroRecorder(CONFIG_DIR)
         self.base_step_count = 0
@@ -452,24 +468,49 @@ class RecorderApp(_AppBase):
         self.action_combo.grid(row=0, column=3, padx=4)
         self.action_combo.bind("<<ComboboxSelected>>", lambda e: self._on_action_changed())
 
-        self.form_frame = ttk.LabelFrame(self, text="入力", padding=10)
-        self.form_frame.pack(fill="x", padx=8, pady=4)
+        body = ttk.Frame(self)
+        body.pack(fill="both", expand=True)
 
-        log_frame = ttk.LabelFrame(self, text="ログ(実行結果・エラー)", padding=4)
-        log_frame.pack(fill="both", expand=False, padx=8, pady=4)
+        left = ttk.Frame(body)
+        left.pack(side="left", fill="both", expand=True, padx=(8, 4), pady=4)
+
+        right = ttk.Frame(body, width=260)
+        right.pack(side="right", fill="y", padx=(4, 8), pady=4)
+        right.pack_propagate(False)
+
+        self.form_frame = ttk.LabelFrame(left, text="入力", padding=10)
+        self.form_frame.pack(fill="x")
+
+        log_frame = ttk.LabelFrame(left, text="ログ(実行結果・エラー)", padding=4)
+        log_frame.pack(fill="both", expand=False, pady=4)
         self.log_text = scrolledtext.ScrolledText(log_frame, height=7, state="disabled")
         self.log_text.pack(fill="both", expand=True)
 
-        steps_frame = ttk.LabelFrame(self, text="記録済みの手順", padding=4)
-        steps_frame.pack(fill="both", expand=True, padx=8, pady=4)
+        steps_frame = ttk.LabelFrame(left, text="記録済みの手順", padding=4)
+        steps_frame.pack(fill="both", expand=True, pady=4)
         self.steps_listbox = tk.Listbox(steps_frame)
         self.steps_listbox.pack(fill="both", expand=True)
 
-        bottom = ttk.Frame(self, padding=8)
-        bottom.pack(fill="x")
+        bottom = ttk.Frame(left)
+        bottom.pack(fill="x", pady=(4, 0))
         ttk.Button(bottom, text="元に戻す(直前の操作を取り消す)", command=self._undo).pack(side="left")
         ttk.Button(bottom, text="保存して終了", command=self._finish).pack(side="right")
         ttk.Button(bottom, text="中止(保存しない)", command=self._cancel_all).pack(side="right", padx=6)
+
+        var_frame = ttk.LabelFrame(right, text="変数一覧(記録時点の値)", padding=4)
+        var_frame.pack(fill="both", expand=True)
+        ttk.Label(
+            var_frame,
+            text="store_asで保存した変数・リストです。実行のたびに\n値が変わる場合があります(Excelの最終行等)。",
+            foreground="#557", justify="left", wraplength=230,
+        ).pack(anchor="w", pady=(0, 4))
+        columns = ("name", "value")
+        self.variables_tree = ttk.Treeview(var_frame, columns=columns, show="headings", height=14)
+        self.variables_tree.heading("name", text="変数名(型)")
+        self.variables_tree.heading("value", text="値")
+        self.variables_tree.column("name", width=90, anchor="w")
+        self.variables_tree.column("value", width=140, anchor="w")
+        self.variables_tree.pack(fill="both", expand=True)
 
     def log(self, message: str) -> None:
         self.log_text.configure(state="normal")
@@ -484,10 +525,25 @@ class RecorderApp(_AppBase):
                 "end", f"{i}. {step['handler']}.{step['action']}  {step.get('params', {})}"
             )
 
-    def register_step(self, step: dict) -> None:
+    def register_step(self, step: dict, value: Any = _NO_VALUE) -> None:
+        """手順を登録する。value を渡すと(store_asが設定されている場合)、
+        記録時点で確認できた実値として変数一覧パネルにも反映する。
+        """
         self.recorder.steps.append(step)
+        store_as = step.get("store_as")
+        if store_as and value is not _NO_VALUE:
+            self.recorder.record_variable(store_as, value)
+            self.refresh_variables()
         self.refresh_steps()
         self.log(f"✅ 登録しました: {step['handler']}.{step['action']}")
+
+    def refresh_variables(self) -> None:
+        self.variables_tree.delete(*self.variables_tree.get_children())
+        for name, value in self.recorder.variables.items():
+            preview = repr(value)
+            if len(preview) > 200:
+                preview = preview[:200] + "..."
+            self.variables_tree.insert("", "end", values=(f"{name} ({type(value).__name__})", preview))
 
     # ---------- 領域/操作の切り替え ----------
 
@@ -654,21 +710,126 @@ class RecorderApp(_AppBase):
         elif action == "セルに書き込む":
             sheet_field = ValueSlotField(f, "対象シート名")
             sheet_field.pack(fill="x", pady=4)
-            pairs = PairsField(f, "セル(例:B2)", "値")
-            pairs.pack(fill="x", pady=4)
+
+            ttk.Label(f, text="セル参照の指定方法:").pack(anchor="w", pady=(6, 0))
+            basis_var = tk.StringVar(value="direct")
+            basis_frame = ttk.Frame(f)
+            basis_frame.pack(anchor="w", pady=2)
+            ttk.Radiobutton(basis_frame, text="直接指定", variable=basis_var, value="direct").pack(side="left")
+            ttk.Radiobutton(
+                basis_frame, text="最終行の続き(列だけ指定)", variable=basis_var, value="last_row"
+            ).pack(side="left")
+            ttk.Radiobutton(
+                basis_frame, text="最終列の続き(行だけ指定)", variable=basis_var, value="last_col"
+            ).pack(side="left")
+
+            sub_frame = ttk.Frame(f)
+            sub_frame.pack(fill="x", pady=4)
+            sub_widgets: dict = {}
+
+            def rebuild_sub(*_args):
+                for child in sub_frame.winfo_children():
+                    child.destroy()
+                basis = basis_var.get()
+                if basis == "last_row":
+                    sub_widgets["scope"] = PlainField(sub_frame, "最終行を判定する基準列(空欄でシート全体)")
+                    sub_widgets["scope"].pack(fill="x", pady=2)
+                    sub_widgets["offset"] = PlainField(sub_frame, "最終行から何行後に書き込むか(空欄で1)")
+                    sub_widgets["offset"].pack(fill="x", pady=2)
+                    sub_widgets["pairs"] = PairsField(sub_frame, "列(例:B)", "値")
+                    sub_widgets["pairs"].pack(fill="x")
+                elif basis == "last_col":
+                    sub_widgets["scope"] = PlainField(sub_frame, "最終列を判定する基準行(行番号)")
+                    sub_widgets["scope"].pack(fill="x", pady=2)
+                    sub_widgets["offset"] = PlainField(sub_frame, "最終列から何列後に書き込むか(空欄で1)")
+                    sub_widgets["offset"].pack(fill="x", pady=2)
+                    sub_widgets["pairs"] = PairsField(sub_frame, "行(例:5)", "値")
+                    sub_widgets["pairs"].pack(fill="x")
+                else:
+                    sub_widgets["pairs"] = PairsField(sub_frame, "セル(例:B2)", "値")
+                    sub_widgets["pairs"].pack(fill="x")
+
+            basis_var.trace_add("write", rebuild_sub)
+            rebuild_sub()
 
             def on_submit():
                 sheet_test, sheet_param, _ = sheet_field.get()
-                cell_values = pairs.get()
-                if not cell_values:
+                basis = basis_var.get()
+                raw_pairs = sub_widgets["pairs"].get()
+                if not raw_pairs:
                     self.log("⚠ セルの値が1つも入力されていません")
                     return
+
+                prereq_step = None
+                prereq_value = None
+                if basis == "last_row":
+                    scope = sub_widgets["scope"].get().strip()
+                    try:
+                        offset = int(sub_widgets["offset"].get().strip() or "1")
+                    except ValueError:
+                        offset = 1
+                    try:
+                        current_last_row = self.recorder.excel.get_last_row(sheet_test, column=scope or None)
+                    except Exception as e:  # noqa: BLE001
+                        self.log(f"⚠ {e}")
+                        return
+                    var_name = self.recorder._next_auto_var("last_row")
+                    prereq_step = {
+                        "handler": "excel", "action": "get_last_row",
+                        "params": {"sheet_name": sheet_param, "column": scope or None},
+                        "store_as": var_name,
+                    }
+                    prereq_value = current_last_row
+                    row_test = current_last_row + offset
+                    row_part = _offset_template(var_name, offset)
+                    cell_values_test = {f"{col}{row_test}": v for col, v in raw_pairs.items()}
+                    cell_values_param = {f"{col}{row_part}": v for col, v in raw_pairs.items()}
+                    self.log(f"→ 今の時点の最終行は{current_last_row}行目なので、動作確認では{row_test}行目に書き込みます")
+                elif basis == "last_col":
+                    scope = sub_widgets["scope"].get().strip()
+                    if not scope.isdigit():
+                        self.log("⚠ 基準行は数字で入力してください")
+                        return
+                    try:
+                        offset = int(sub_widgets["offset"].get().strip() or "1")
+                    except ValueError:
+                        offset = 1
+                    try:
+                        current_last_col = self.recorder.excel.get_last_column(sheet_test, row=scope)
+                    except Exception as e:  # noqa: BLE001
+                        self.log(f"⚠ {e}")
+                        return
+                    col_idx_base = column_index_from_string(current_last_col) if current_last_col else 0
+                    if col_idx_base + offset < 1:
+                        self.log("⚠ 指定したオフセットでは列がA列より前になります")
+                        return
+                    var_name = self.recorder._next_auto_var("last_col")
+                    prereq_step = {
+                        "handler": "excel", "action": "get_last_column",
+                        "params": {"sheet_name": sheet_param, "row": int(scope)},
+                        "store_as": var_name,
+                    }
+                    prereq_value = current_last_col
+                    col_test = get_column_letter(col_idx_base + offset)
+                    col_part = _offset_template(var_name, offset)
+                    cell_values_test = {f"{col_test}{row}": v for row, v in raw_pairs.items()}
+                    cell_values_param = {f"{col_part}{row}": v for row, v in raw_pairs.items()}
+                    self.log(
+                        f"→ 今の時点の最終列は{current_last_col or '(無し)'}なので、"
+                        f"動作確認では{col_test}列に書き込みます"
+                    )
+                else:
+                    cell_values_test = raw_pairs
+                    cell_values_param = raw_pairs
+
                 try:
-                    self.recorder.excel.write_cells(sheet_test, cell_values)
+                    self.recorder.excel.write_cells(sheet_test, cell_values_test)
                     self.log("→ セルへの書き込みを確認できました")
+                    if prereq_step:
+                        self.register_step(prereq_step, prereq_value)
                     self.register_step({
                         "handler": "excel", "action": "write_cells",
-                        "params": {"sheet_name": sheet_param, "cell_values": cell_values},
+                        "params": {"sheet_name": sheet_param, "cell_values": cell_values_param},
                     })
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
@@ -800,7 +961,7 @@ class RecorderApp(_AppBase):
                             "params": {"sheet_name": sheet_param, "cell_ref": cell_param}}
                     if store_as:
                         step["store_as"] = store_as
-                    self.register_step(step)
+                    self.register_step(step, value)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
 
@@ -823,7 +984,30 @@ class RecorderApp(_AppBase):
                             "params": {"sheet_name": sheet_param, "column": column}}
                     if store_as:
                         step["store_as"] = store_as
-                    self.register_step(step)
+                    self.register_step(step, last_row)
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "最終列を取得する":
+            sheet_field = ValueSlotField(f, "対象シート名")
+            sheet_field.pack(fill="x", pady=4)
+            row_field = PlainField(f, "対象行番号(空欄でシート全体)")
+            row_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                sheet_test, sheet_param, _ = sheet_field.get()
+                row = row_field.get().strip() or None
+                try:
+                    last_col = self.recorder.excel.get_last_column(sheet_test, row=row)
+                    self.log(f"→ 取得できました: {last_col or '(該当する列なし)'}列目")
+                    store_as = self._ask_store_as()
+                    step = {"handler": "excel", "action": "get_last_column",
+                            "params": {"sheet_name": sheet_param, "row": row}}
+                    if store_as:
+                        step["store_as"] = store_as
+                    self.register_step(step, last_col)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
 
@@ -832,17 +1016,55 @@ class RecorderApp(_AppBase):
         elif action == "セルをコピーして貼り付ける":
             ttk.Label(
                 f,
-                text="欄には {{last_row}} のように前の手順の結果を埋め込めます\n"
-                     "(例: A1:B{{last_row}} 。次の行なら A{{last_row+1}} のように"
-                     "変数名の後ろに+数値/-数値も書けます)",
+                text="コピー元の範囲欄には {{last_row}} のように前の手順の結果を埋め込めます\n"
+                     "(例: A1:B{{last_row}} 。変数名の後ろに+数値/-数値も書けます)",
                 foreground="#557", justify="left",
             ).pack(anchor="w", pady=(0, 6))
             sheet_field = ValueSlotField(f, "対象シート名")
             sheet_field.pack(fill="x", pady=4)
             src_field = ValueSlotField(f, "コピー元の範囲(例: A1:B3 または A1:B{{last_row}})")
             src_field.pack(fill="x", pady=4)
-            dest_field = ValueSlotField(f, "貼り付け先の左上セル(例: D1)")
-            dest_field.pack(fill="x", pady=4)
+
+            ttk.Label(f, text="貼り付け先の指定方法:").pack(anchor="w", pady=(6, 0))
+            dest_basis_var = tk.StringVar(value="direct")
+            dest_basis_frame = ttk.Frame(f)
+            dest_basis_frame.pack(anchor="w", pady=2)
+            ttk.Radiobutton(
+                dest_basis_frame, text="直接指定", variable=dest_basis_var, value="direct"
+            ).pack(side="left")
+            ttk.Radiobutton(
+                dest_basis_frame, text="最終行の続き(列を指定)", variable=dest_basis_var, value="last_row"
+            ).pack(side="left")
+            ttk.Radiobutton(
+                dest_basis_frame, text="最終列の続き(行を指定)", variable=dest_basis_var, value="last_col"
+            ).pack(side="left")
+
+            dest_sub_frame = ttk.Frame(f)
+            dest_sub_frame.pack(fill="x", pady=4)
+            dest_widgets: dict = {}
+
+            def rebuild_dest_sub(*_args):
+                for child in dest_sub_frame.winfo_children():
+                    child.destroy()
+                basis = dest_basis_var.get()
+                if basis == "last_row":
+                    dest_widgets["col"] = PlainField(dest_sub_frame, "貼り付け先の列(例: D)")
+                    dest_widgets["col"].pack(fill="x", pady=2)
+                    dest_widgets["scope"] = PlainField(dest_sub_frame, "最終行を判定する基準列(空欄でシート全体)")
+                    dest_widgets["scope"].pack(fill="x", pady=2)
+                    dest_widgets["offset"] = PlainField(dest_sub_frame, "最終行から何行後に貼り付けるか(空欄で1)")
+                    dest_widgets["offset"].pack(fill="x", pady=2)
+                elif basis == "last_col":
+                    dest_widgets["row"] = PlainField(dest_sub_frame, "貼り付け先の行番号(例: 5)")
+                    dest_widgets["row"].pack(fill="x", pady=2)
+                    dest_widgets["offset"] = PlainField(dest_sub_frame, "最終列から何列後に貼り付けるか(空欄で1)")
+                    dest_widgets["offset"].pack(fill="x", pady=2)
+                else:
+                    dest_widgets["cell"] = ValueSlotField(dest_sub_frame, "貼り付け先の左上セル(例: D1)")
+                    dest_widgets["cell"].pack(fill="x")
+
+            dest_basis_var.trace_add("write", rebuild_dest_sub)
+            rebuild_dest_sub()
 
             ttk.Label(f, text="貼り付け方法:").pack(anchor="w", pady=(6, 0))
             paste_type_var = tk.StringVar(value="values")
@@ -855,8 +1077,75 @@ class RecorderApp(_AppBase):
             def on_submit():
                 sheet_test, sheet_param, _ = sheet_field.get()
                 src_test, src_param, _ = src_field.get()
-                dest_test, dest_param, _ = dest_field.get()
                 paste_type = paste_type_var.get()
+                dest_basis = dest_basis_var.get()
+
+                prereq_step = None
+                prereq_value = None
+                if dest_basis == "last_row":
+                    col_raw = dest_widgets["col"].get().strip()
+                    try:
+                        col_idx = int(col_raw) if col_raw.isdigit() else column_index_from_string(col_raw.upper())
+                        col_letter = get_column_letter(col_idx)
+                    except ValueError:
+                        self.log("⚠ 貼り付け先の列の指定が不正です")
+                        return
+                    scope = dest_widgets["scope"].get().strip()
+                    try:
+                        offset = int(dest_widgets["offset"].get().strip() or "1")
+                    except ValueError:
+                        offset = 1
+                    try:
+                        current_last_row = self.recorder.excel.get_last_row(sheet_test, column=scope or None)
+                    except Exception as e:  # noqa: BLE001
+                        self.log(f"⚠ {e}")
+                        return
+                    var_name = self.recorder._next_auto_var("last_row")
+                    prereq_step = {
+                        "handler": "excel", "action": "get_last_row",
+                        "params": {"sheet_name": sheet_param, "column": scope or None},
+                        "store_as": var_name,
+                    }
+                    prereq_value = current_last_row
+                    dest_row_test = current_last_row + offset
+                    dest_test = f"{col_letter}{dest_row_test}"
+                    dest_param = f"{col_letter}{_offset_template(var_name, offset)}"
+                    self.log(f"→ 今の時点の最終行は{current_last_row}行目なので、動作確認では{dest_test}に貼り付けます")
+                elif dest_basis == "last_col":
+                    row_raw = dest_widgets["row"].get().strip()
+                    if not row_raw.isdigit():
+                        self.log("⚠ 貼り付け先の行番号は数字で入力してください")
+                        return
+                    try:
+                        offset = int(dest_widgets["offset"].get().strip() or "1")
+                    except ValueError:
+                        offset = 1
+                    try:
+                        current_last_col = self.recorder.excel.get_last_column(sheet_test, row=row_raw)
+                    except Exception as e:  # noqa: BLE001
+                        self.log(f"⚠ {e}")
+                        return
+                    col_idx_base = column_index_from_string(current_last_col) if current_last_col else 0
+                    if col_idx_base + offset < 1:
+                        self.log("⚠ 指定したオフセットでは列がA列より前になります")
+                        return
+                    var_name = self.recorder._next_auto_var("last_col")
+                    prereq_step = {
+                        "handler": "excel", "action": "get_last_column",
+                        "params": {"sheet_name": sheet_param, "row": int(row_raw)},
+                        "store_as": var_name,
+                    }
+                    prereq_value = current_last_col
+                    dest_col_test = get_column_letter(col_idx_base + offset)
+                    dest_test = f"{dest_col_test}{row_raw}"
+                    dest_param = f"{_offset_template(var_name, offset)}{row_raw}"
+                    self.log(
+                        f"→ 今の時点の最終列は{current_last_col or '(無し)'}なので、"
+                        f"動作確認では{dest_test}に貼り付けます"
+                    )
+                else:
+                    dest_test, dest_param, _ = dest_widgets["cell"].get()
+
                 step = {
                     "handler": "excel", "action": "copy_cell_range",
                     "params": {
@@ -864,8 +1153,10 @@ class RecorderApp(_AppBase):
                         "dest_cell": dest_param, "paste_type": paste_type,
                     },
                 }
-                if self._has_template(src_test) or self._has_template(dest_test) or self._has_template(sheet_test):
+                if self._has_template(src_test) or self._has_template(sheet_test):
                     self.log("→ 変数参照が含まれるため動作確認をスキップして登録します")
+                    if prereq_step:
+                        self.register_step(prereq_step, prereq_value)
                     self.register_step(step)
                     return
                 try:
@@ -873,6 +1164,8 @@ class RecorderApp(_AppBase):
                         sheet_test, src_test, dest_test, paste_type=paste_type
                     )
                     self.log(f"→ {result}")
+                    if prereq_step:
+                        self.register_step(prereq_step, prereq_value)
                     self.register_step(step)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
@@ -909,7 +1202,7 @@ class RecorderApp(_AppBase):
                     step = {"handler": "excel", "action": "get_sheet_names", "params": {}}
                     if store_as:
                         step["store_as"] = store_as
-                    self.register_step(step)
+                    self.register_step(step, names)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
 
@@ -1012,7 +1305,7 @@ class RecorderApp(_AppBase):
                             "params": {"sheet_name": sheet_param, "cell_range": range_param}}
                     if store_as:
                         step["store_as"] = store_as
-                    self.register_step(step)
+                    self.register_step(step, result)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
 
@@ -1038,7 +1331,7 @@ class RecorderApp(_AppBase):
                             "params": {"sheet_name": sheet_param, "value": value_param, "column": column}}
                     if store_as:
                         step["store_as"] = store_as
-                    self.register_step(step)
+                    self.register_step(step, address)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
 
@@ -1430,7 +1723,7 @@ class RecorderApp(_AppBase):
                     }
                     if store_as:
                         step["store_as"] = store_as
-                    self.register_step(step)
+                    self.register_step(step, result)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
 
@@ -1488,7 +1781,7 @@ class RecorderApp(_AppBase):
                     step = {"handler": "pdf", "action": "get_page_count", "params": {"input_path": in_param}}
                     if store_as:
                         step["store_as"] = store_as
-                    self.register_step(step)
+                    self.register_step(step, count)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
 
@@ -1782,7 +2075,7 @@ class RecorderApp(_AppBase):
                     step = {"handler": "browser", "action": "get_text_by_selector", "params": {"selector": selector}}
                     if store_as:
                         step["store_as"] = store_as
-                    self.register_step(step)
+                    self.register_step(step, text)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
 
@@ -1809,7 +2102,7 @@ class RecorderApp(_AppBase):
                     }
                     if store_as:
                         step["store_as"] = store_as
-                    self.register_step(step)
+                    self.register_step(step, value)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
 
@@ -1836,7 +2129,7 @@ class RecorderApp(_AppBase):
                     }
                     if store_as:
                         step["store_as"] = store_as
-                    self.register_step(step)
+                    self.register_step(step, values)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
 
@@ -2113,7 +2406,7 @@ class RecorderApp(_AppBase):
                     step = {"handler": "explorer", "action": "path_exists", "params": {"path": param_v}}
                     if store_as:
                         step["store_as"] = store_as
-                    self.register_step(step)
+                    self.register_step(step, exists)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
 
@@ -2144,7 +2437,7 @@ class RecorderApp(_AppBase):
                     }
                     if store_as:
                         step["store_as"] = store_as
-                    self.register_step(step)
+                    self.register_step(step, files)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
 
@@ -2640,7 +2933,7 @@ class RecorderApp(_AppBase):
                 step = {"handler": "text", "action": "cut_from_marker", "params": params}
                 if store_as:
                     step["store_as"] = store_as
-                self.register_step(step)
+                self.register_step(step, result if not is_var else _NO_VALUE)
 
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
@@ -2667,37 +2960,57 @@ class RecorderApp(_AppBase):
                         "params": {"text": text_val, "search": search, "replace": replace}}
                 if store_as:
                     step["store_as"] = store_as
-                self.register_step(step)
+                self.register_step(step, result if not is_var else _NO_VALUE)
 
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
-        elif action == "日付・時刻の一部を取得する":
-            ttk.Label(f, text="要素: year / fiscal_year / month / day / hour / minute / second / date / datetime").pack(
-                anchor="w", pady=(0, 4)
-            )
-            component_field = PlainField(f, "取得する要素", default="year", width=20)
-            component_field.pack(fill="x", pady=4)
-            fy_field = PlainField(f, "年度の開始月(fiscal_year使用時)", default="4")
+        elif action == "日付・時刻を取得する":
+            ttk.Label(
+                f, text="トークン: yyyy(西暦) YYYY(年度) MM/M(月) dd/d(日) hh mm ss(時分秒)\n"
+                        "トークン以外の文字はそのまま残ります(例: yyyy年MM月dd日)",
+                foreground="#557", justify="left",
+            ).pack(anchor="w", pady=(0, 6))
+
+            presets = {
+                "yyyyMMdd_hhmmss (ファイル名の一意化等)": "yyyyMMdd_hhmmss",
+                "yyyyMMdd": "yyyyMMdd",
+                "hhmmss": "hhmmss",
+                "yyyy (西暦年)": "yyyy",
+                "YYYY (年度)": "YYYY",
+                "自分で入力する": "",
+            }
+            ttk.Label(f, text="よく使う書式:").pack(anchor="w")
+            preset_combo = ttk.Combobox(f, state="readonly", values=list(presets.keys()), width=40)
+            preset_combo.current(0)
+            preset_combo.pack(fill="x", pady=4)
+
+            custom_field = PlainField(f, "書式コード(「自分で入力する」を選んだ場合)", width=30)
+            custom_field.pack(fill="x", pady=4)
+            fy_field = PlainField(f, "年度の開始月(YYYY使用時。空欄で既定4月)", default="4")
             fy_field.pack(fill="x", pady=4)
 
             def on_submit():
-                component = component_field.get().strip()
+                preset_key = preset_combo.get()
+                format_code = presets.get(preset_key) or custom_field.get().strip()
+                if not format_code:
+                    self.log("⚠ 書式コードを入力してください")
+                    return
                 try:
                     fy_month = int(fy_field.get() or "4")
                 except ValueError:
                     fy_month = 4
                 try:
-                    result = self.recorder.text.get_datetime_part(component, fiscal_year_start_month=fy_month)
+                    result = self.recorder.text.format_now(format_code, fiscal_year_start_month=fy_month)
                     self.log(f"→ 動作確認できました: {result}")
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
                     return
                 store_as = self._ask_store_as()
-                step = {"handler": "text", "action": "get_datetime_part",
-                        "params": {"component": component, "fiscal_year_start_month": fy_month}}
+                step = {"handler": "text", "action": "format_now",
+                        "params": {"format_code": format_code, "fiscal_year_start_month": fy_month}}
                 if store_as:
                     step["store_as"] = store_as
-                self.register_step(step)
+                self.register_step(step, result)
 
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
@@ -2737,7 +3050,7 @@ class RecorderApp(_AppBase):
                         "params": {"parts": parts, "separator": separator}}
                 if store_as:
                     step["store_as"] = store_as
-                self.register_step(step)
+                self.register_step(step, result if not has_var else _NO_VALUE)
 
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
@@ -2769,9 +3082,12 @@ class RecorderApp(_AppBase):
 
         elif action == "クリップボードから取得する":
             def on_submit():
+                value = None
+                confirmed = False
                 try:
                     value = self.recorder.text.get_from_clipboard()
                     self.log(f"→ 取得できました: {value[:100]!r}")
+                    confirmed = True
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
                     if not self._confirm("未確認のままこの手順を登録しますか?"):
@@ -2780,7 +3096,7 @@ class RecorderApp(_AppBase):
                 step = {"handler": "text", "action": "get_from_clipboard", "params": {}}
                 if store_as:
                     step["store_as"] = store_as
-                self.register_step(step)
+                self.register_step(step, value if confirmed else _NO_VALUE)
 
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
@@ -2804,7 +3120,7 @@ class RecorderApp(_AppBase):
                     return
                 self.register_step({
                     "handler": "list", "action": "create_empty", "params": {}, "store_as": store_as,
-                })
+                }, [])
 
             ttk.Button(f, text="登録", command=on_submit).pack(pady=6)
 
@@ -2965,6 +3281,34 @@ class RecorderApp(_AppBase):
 
             ttk.Button(f, text="登録", command=on_submit).pack(pady=6)
 
+        elif action == "変数の型を変換する(文字列/整数/小数)":
+            ttk.Label(
+                f, text="Excelのセル値等は先頭が0の値(郵便番号等)を保持するため基本的に\n"
+                        "文字列として扱われます。計算に使いたい場合や、逆に確実に文字列と\n"
+                        "して扱いたい場合に、変数の型を強制的に変換します。",
+                foreground="#557", justify="left",
+            ).pack(anchor="w", pady=(0, 6))
+            var_field = PlainField(f, "変換する変数名(例: A)", width=20)
+            var_field.pack(fill="x", pady=4)
+            type_var = tk.StringVar(value="to_str")
+            type_frame = ttk.Frame(f)
+            type_frame.pack(anchor="w", pady=2)
+            ttk.Radiobutton(type_frame, text="文字列(str)", variable=type_var, value="to_str").pack(side="left")
+            ttk.Radiobutton(type_frame, text="整数(int)", variable=type_var, value="to_int").pack(side="left")
+            ttk.Radiobutton(type_frame, text="小数(float)", variable=type_var, value="to_float").pack(side="left")
+
+            def on_submit():
+                var_name = var_field.get().strip()
+                if not var_name:
+                    self.log("⚠ 変数名を入力してください")
+                    return
+                self.register_step({
+                    "handler": "control", "action": type_var.get(),
+                    "params": {"value": "{{" + var_name + "}}"}, "store_as": var_name,
+                })
+
+            ttk.Button(f, text="登録", command=on_submit).pack(pady=6)
+
         elif action == "繰り返しを開始する(for)":
             var_field = PlainField(f, "ループカウンタの変数名", default="i", width=15)
             var_field.pack(fill="x", pady=4)
@@ -3033,6 +3377,11 @@ class RecorderApp(_AppBase):
             )
             if not still_used and slot_name in self.recorder.required_slots:
                 self.recorder.required_slots.remove(slot_name)
+
+        removed_store_as = removed.get("store_as")
+        if removed_store_as and removed_store_as in self.recorder.variables:
+            del self.recorder.variables[removed_store_as]
+            self.refresh_variables()
 
         self.refresh_steps()
         self.log(f"直前の操作を取り消しました: {removed['handler']}.{removed['action']}")

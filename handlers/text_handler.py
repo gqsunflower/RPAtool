@@ -19,7 +19,10 @@ OSのクリップボードとの連携(copy_to_clipboard / get_from_clipboard)�
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime
+
+_DATETIME_TOKEN_RE = re.compile(r"yyyy|YYYY|MM|dd|hh|mm|ss|M|d")
 
 
 class TextHandler:
@@ -56,33 +59,57 @@ class TextHandler:
         """textの中の search を replace に置換する(すべて置換)。"""
         return text.replace(search, replace)
 
-    def get_datetime_part(self, component: str, fiscal_year_start_month: int = 4) -> str:
-        """現在の日付・時刻から指定した要素を文字列として取得する。
-        component: "year"(西暦年) / "fiscal_year"(年度) / "month" / "day" /
-                   "hour" / "minute" / "second" / "date"(YYYY-MM-DD) /
-                   "datetime"(YYYY-MM-DD HH:MM:SS)
-        fiscal_year_start_month: 年度の開始月(既定4月。日本の会計年度に合わせた既定値)
+    def format_now(self, format_code: str, fiscal_year_start_month: int = 4) -> str:
+        """現在の日付・時刻を、指定した書式コードの文字列に変換する
+        (Excelのユーザー定義表示形式と似た書き方の、よく使うものだけに絞った書式)。
+
+        使えるトークン(大文字・小文字を区別する):
+          yyyy  西暦年(4桁。例: 2026)
+          YYYY  年度(4桁。fiscal_year_start_monthで開始月を指定、既定4月始まり)
+          MM    月(2桁ゼロ埋め。例: 09)
+          M     月(ゼロ埋めなし。例: 9)
+          dd    日(2桁ゼロ埋め)
+          d     日(ゼロ埋めなし)
+          hh    時(2桁ゼロ埋め、24時間表記)
+          mm    分(2桁ゼロ埋め)
+          ss    秒(2桁ゼロ埋め)
+        トークン以外の文字(区切りの"_"や"年","月"等)はそのまま残る。
+
+        よく使う書式の例:
+          "yyyyMMdd_hhmmss" → "20260830_143022"(ファイル名の一意化によく使う)
+          "yyyyMMdd"        → "20260830"
+          "hhmmss"          → "143022"
+          "yyyy"            → "2026"(西暦年)
+          "YYYY"            → "2025"(年度。4月始まりなら1〜3月は前年扱い)
+
+        保存ファイル名(例: "report_{{now}}.xlsx")やセルへの入力、Webフォームへの
+        入力など、Excel/PDF/エクスプローラー/Webのどの手順の値欄でも
+        store_asで変数に保存すれば {{変数名}} として埋め込んで使える。
         """
         now = datetime.now()
-        mapping = {
-            "year": str(now.year),
-            "month": str(now.month),
-            "day": str(now.day),
-            "hour": str(now.hour),
-            "minute": str(now.minute),
-            "second": str(now.second),
-            "date": now.strftime("%Y-%m-%d"),
-            "datetime": now.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        if component == "fiscal_year":
-            fy = now.year if now.month >= fiscal_year_start_month else now.year - 1
-            return str(fy)
-        if component not in mapping:
-            raise ValueError(
-                f"未知のcomponentです: {component}"
-                f"(使えるもの: {list(mapping.keys()) + ['fiscal_year']})"
-            )
-        return mapping[component]
+        fiscal_year = now.year if now.month >= fiscal_year_start_month else now.year - 1
+
+        def _replace(match: re.Match) -> str:
+            token = match.group(0)
+            if token == "yyyy":
+                return f"{now.year:04d}"
+            if token == "YYYY":
+                return f"{fiscal_year:04d}"
+            if token == "MM":
+                return f"{now.month:02d}"
+            if token == "M":
+                return str(now.month)
+            if token == "dd":
+                return f"{now.day:02d}"
+            if token == "d":
+                return str(now.day)
+            if token == "hh":
+                return f"{now.hour:02d}"
+            if token == "mm":
+                return f"{now.minute:02d}"
+            return f"{now.second:02d}"  # ss
+
+        return _DATETIME_TOKEN_RE.sub(_replace, format_code)
 
     def append_text(self, text: str, suffix: str, before: bool = False) -> str:
         """textの前(before=True)または後ろ(既定)に文字列を付け加える。"""

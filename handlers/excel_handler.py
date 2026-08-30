@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import load_workbook
-from openpyxl.utils import column_index_from_string
+from openpyxl.utils import column_index_from_string, get_column_letter
 
 logger = logging.getLogger("rpa_local_ai.excel")
 
@@ -186,6 +186,33 @@ class ExcelHandler:
             if ws.cell(row=row, column=col_idx).value is not None:
                 last_row = row
         return last_row
+
+    def get_last_column(self, sheet_name: str, row: str | int | None = None) -> str:
+        """最終列を列文字("A","B",...)で取得する。rowを指定すると、その行で
+        値が入っている最後の列を返す(Excelで言う行方向のCtrl+→に相当)。
+        省略時はシート全体の使用範囲の最終列(ws.max_column)を返す。
+
+        戻り値は列文字のため、そのまま {{変数名}} でセル参照の一部として
+        埋め込める。さらに {{変数名+1}} / {{変数名-1}} と書くと、その1つ右/左の
+        列文字が得られる(表の右隣の列に続けて書き込みたい場合等に使う)。
+        """
+        entry = self._active()
+        wb = entry["wb"]
+        if sheet_name not in wb.sheetnames:
+            raise KeyError(f"シートが見つかりません: {sheet_name}")
+        ws = wb[sheet_name]
+        if row is None:
+            return get_column_letter(ws.max_column)
+
+        row_idx = int(row)
+        last_col = 0
+        for col in range(1, ws.max_column + 1):
+            if ws.cell(row=row_idx, column=col).value is not None:
+                last_col = col
+        # 該当行に値が1つも無い場合は「A列より前」を表す空文字列を返す
+        # (get_last_rowが値0を返すのと同じ考え方。{{last_col+1}}とすれば
+        # 正しく"A"が得られる)
+        return get_column_letter(last_col) if last_col else ""
 
     def get_sheet_names(self) -> list[str]:
         """アクティブなブックのシート名一覧を取得する。"""

@@ -33,6 +33,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
+
+from openpyxl.utils import column_index_from_string, get_column_letter
 
 from engine.backup import backup_file
 from handlers.browser_handler import (
@@ -51,6 +54,16 @@ from handlers.text_handler import TextHandler
 CANCEL_WORDS = {"キャンセル", "cancel", "戻る", "やめる"}
 
 
+def _offset_template(var_name: str, offset: int) -> str:
+    """{{var_name}} に対するオフセット付きテンプレート文字列を組み立てる。
+    offset=0なら "{{var_name}}"、それ以外は "{{var_name+N}}"/"{{var_name-N}}"。
+    """
+    if offset == 0:
+        return "{{" + var_name + "}}"
+    sign = "+" if offset > 0 else "-"
+    return "{{" + var_name + sign + str(abs(offset)) + "}}"
+
+
 class _ActionCancelled(Exception):
     """記録中の操作を、目印/パス入力の時点で取りやめたことを表す。"""
 
@@ -66,9 +79,30 @@ class MacroRecorder:
         self.desktop = DesktopHandler()
         self.text = TextHandler()
         self.list = ListHandler()
+        # 記録中に実際に動作確認できた変数・リストの値(変数名 -> 値)。
+        # レコーダーが各手順を動作確認した「その場の実値」を記録しておき、
+        # GUIの右側パネル等でユーザーに一覧表示するために使う。あくまで
+        # 記録時点のスナップショットであり、実行時に必ず同じ値になるとは限らない
+        # (次回実行時にExcelの中身が変わっていれば最終行等は変わる)。
+        self.variables: dict[str, Any] = {}
         self.steps: list[dict] = []
         self.required_slots: list[str] = []
         self._site_opened = False
+        self._auto_var_counter = 0
+
+    def _next_auto_var(self, prefix: str) -> str:
+        """最終行/最終列などを自動取得する際に使う、衝突しない変数名を発行する。"""
+        self._auto_var_counter += 1
+        return f"_auto_{prefix}_{self._auto_var_counter}"
+
+    def record_variable(self, name: str, value: Any) -> None:
+        """store_asで変数として保存する手順を、実際に動作確認できたときに呼ぶ。
+        記録時点で確認できた実値を self.variables に記録しておき、GUIの
+        変数一覧パネル等で確認できるようにする(あくまで記録時点のスナップ
+        ショットであり、実行のたびに変わりうる値はその都度更新される)。
+        """
+        if name:
+            self.variables[name] = value
 
     # ---------- 共通の入力ヘルパー ----------
 
@@ -238,6 +272,7 @@ class MacroRecorder:
             print("  10) ここまでの操作を保存して終了する")
             print("  11) 保存せずに中止する")
             print("  12) 直前の操作を取り消す(操作を間違えた場合)")
+            print("  13) 今の変数一覧を見る(記録時点で確認できた値)")
             choice = self._ask("番号> ")
             print()
 
@@ -268,8 +303,22 @@ class MacroRecorder:
                 return None
             elif choice == "12":
                 self._undo_last_step(base_step_count)
+            elif choice == "13":
+                self._print_variables()
             else:
-                print("1〜12のいずれかを入力してください。\n")
+                print("1〜13のいずれかを入力してください。\n")
+
+    def _print_variables(self) -> None:
+        if not self.variables:
+            print("  (まだ変数はありません)\n")
+            return
+        print("  今の変数一覧(記録時点で確認できた値。実行時は変わる場合があります):")
+        for name, value in self.variables.items():
+            preview = repr(value)
+            if len(preview) > 100:
+                preview = preview[:100] + "..."
+            print(f"    {name} ({type(value).__name__}) = {preview}")
+        print()
 
     # ---------- 直前の操作の取り消し ----------
 
@@ -286,6 +335,11 @@ class MacroRecorder:
             # サイトを開く手順自体を取り消した場合、次にWeb操作を追加するときは
             # 改めてサイト選択からやり直す
             self._site_opened = False
+
+        removed_store_as = removed.get("store_as")
+        if removed_store_as and removed_store_as in self.variables:
+            del self.variables[removed_store_as]
+            print(f"    (変数 '{removed_store_as}' の記録も取り消しました)")
 
         # このステップでしか使われていなかったスロットは required_slots からも外す
         removed_slot_refs = self._collect_slot_refs(removed.get("params", {}))
@@ -348,6 +402,7 @@ class MacroRecorder:
             print("  21) 行を削除する")
             print("  22) セル範囲の値を空にする")
             print("  23) シートを削除する")
+            print("  24) 最終列を取得する")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -398,10 +453,12 @@ class MacroRecorder:
                 self._record_excel_clear_range()
             elif choice == "23":
                 self._record_excel_delete_sheet()
+            elif choice == "24":
+                self._record_excel_get_last_column()
             elif choice == "0":
                 return
             else:
-                print("0〜23のいずれかを入力してください。\n")
+                print("0〜24のいずれかを入力してください。\n")
 
     def _record_excel_load(self) -> None:
         result = self._ask_sluttable_value("開くExcelファイルのパス")
@@ -473,19 +530,113 @@ class MacroRecorder:
             return
         sheet_test, sheet_param = sheet_result
 
-        print("  書き込むセルと値を入力します(セル参照を空Enterで入力終了)")
+        print("  セル参照の指定方法を選んでください:")
+        print("    1) セル参照を直接指定する(例: B2)")
+        print("    2) 最終行の続きに書き込む(列だけ指定。表の下に1行追加する場合等)")
+        print("    3) 最終列の続きに書き込む(行だけ指定。表の右に1列追加する場合等)")
+        basis = self._ask("  番号(空Enterで1)> ").strip() or "1"
+        print()
+
+        prereq_step: dict | None = None
+        row_part: str | None = None
+        row_test_base: int | None = None
+        col_part: str | None = None
+        col_test_base: str | None = None
+
+        if basis == "2":
+            col_scope = self._ask(
+                "  最終行を判定する基準列(空欄ならシート全体の最終行。"
+                "特定の列のデータの続きに書きたい場合は列を指定): "
+            ).strip()
+            offset_raw = self._ask("  最終行から何行後に書き込みますか?(空Enterで1=次の行): ").strip()
+            try:
+                offset = int(offset_raw) if offset_raw else 1
+            except ValueError:
+                offset = 1
+            try:
+                current_last_row = self.excel.get_last_row(sheet_test, column=col_scope or None)
+            except Exception as e:  # noqa: BLE001
+                print(f"  ⚠ 最終行の取得に失敗しました: {e}\n")
+                return
+            var_name = self._next_auto_var("last_row")
+            prereq_step = {
+                "handler": "excel", "action": "get_last_row",
+                "params": {"sheet_name": sheet_param, "column": col_scope or None},
+                "store_as": var_name,
+            }
+            self.record_variable(var_name, current_last_row)
+            row_test_base = current_last_row + offset
+            row_part = _offset_template(var_name, offset)
+            print(f"  → 今の時点の最終行は{current_last_row}行目なので、"
+                  f"動作確認では{row_test_base}行目に書き込みます。\n")
+        elif basis == "3":
+            row_scope = self._ask("  最終列を判定する基準行(行番号): ").strip()
+            if not row_scope.isdigit():
+                print("  → 行番号を数字で入力してください。この手順は登録しませんでした。\n")
+                return
+            offset_raw = self._ask("  最終列から何列後に書き込みますか?(空Enterで1=次の列): ").strip()
+            try:
+                offset = int(offset_raw) if offset_raw else 1
+            except ValueError:
+                offset = 1
+            try:
+                current_last_col = self.excel.get_last_column(sheet_test, row=row_scope)
+            except Exception as e:  # noqa: BLE001
+                print(f"  ⚠ 最終列の取得に失敗しました: {e}\n")
+                return
+            var_name = self._next_auto_var("last_col")
+            prereq_step = {
+                "handler": "excel", "action": "get_last_column",
+                "params": {"sheet_name": sheet_param, "row": int(row_scope)},
+                "store_as": var_name,
+            }
+            self.record_variable(var_name, current_last_col)
+            col_idx_base = column_index_from_string(current_last_col) if current_last_col else 0
+            if col_idx_base + offset < 1:
+                print("  → 指定したオフセットでは列がA列より前になります。この手順は登録しませんでした。\n")
+                return
+            col_test_base = get_column_letter(col_idx_base + offset)
+            col_part = _offset_template(var_name, offset)
+            print(f"  → 今の時点の最終列は{current_last_col or '(無し)'}なので、"
+                  f"動作確認では{col_test_base}列に書き込みます。\n")
+
+        print("  書き込むセルと値を入力します(空Enterで入力終了)")
         cell_values_test: dict[str, str] = {}
         cell_values_param: dict[str, str] = {}
         while True:
-            cell_ref = self._ask("  セル参照(例: B2。空Enterで入力終了): ")
-            if not cell_ref:
-                break
-            result = self._ask_sluttable_value(f"セル {cell_ref} に書き込む値")
+            if basis == "2":
+                axis_raw = self._ask(f"  列(例: B。行は{row_test_base}に固定。空Enterで入力終了): ").strip()
+                if not axis_raw:
+                    break
+                try:
+                    col_idx = int(axis_raw) if axis_raw.isdigit() else column_index_from_string(axis_raw.upper())
+                    col_letter = get_column_letter(col_idx)
+                except ValueError:
+                    print("  列は 'B' のような列文字、または列番号で入力してください。\n")
+                    continue
+                cell_ref_test = f"{col_letter}{row_test_base}"
+                cell_ref_param = f"{col_letter}{row_part}"
+            elif basis == "3":
+                axis_raw = self._ask(f"  行番号(列は{col_test_base}に固定。空Enterで入力終了): ").strip()
+                if not axis_raw:
+                    break
+                if not axis_raw.isdigit():
+                    print("  → 行番号は数字で入力してください。\n")
+                    continue
+                cell_ref_test = f"{col_test_base}{axis_raw}"
+                cell_ref_param = f"{col_part}{axis_raw}"
+            else:
+                cell_ref_test = self._ask("  セル参照(例: B2。空Enterで入力終了): ")
+                if not cell_ref_test:
+                    break
+                cell_ref_param = cell_ref_test
+
+            result = self._ask_sluttable_value(f"セル {cell_ref_test} に書き込む値")
             if result is None:
                 continue
             test_v, param_v = result
-            cell_values_test[cell_ref] = test_v
-            cell_values_param[cell_ref] = param_v
+            cell_values_test[cell_ref_test] = test_v
+            cell_values_param[cell_ref_param] = param_v
 
         if not cell_values_param:
             print("  → 値が1つも入力されなかったため、この手順は登録しませんでした。\n")
@@ -494,6 +645,8 @@ class MacroRecorder:
         try:
             self.excel.write_cells(sheet_test, cell_values_test)
             print("  → 実際にセルへの書き込みを確認できました。")
+            if prereq_step:
+                self.steps.append(prereq_step)
             self.steps.append({
                 "handler": "excel", "action": "write_cells",
                 "params": {"sheet_name": sheet_param, "cell_values": cell_values_param},
@@ -639,6 +792,8 @@ class MacroRecorder:
             value = self.excel.get_cell_value(sheet_test, cell_test)
             print(f"  → 実際に読み込めました: {value!r}")
             store_as = self._ask_store_as()
+            if store_as:
+                self.record_variable(store_as, value)
             step = {
                 "handler": "excel", "action": "get_cell_value",
                 "params": {"sheet_name": sheet_param, "cell_ref": cell_param},
@@ -662,6 +817,8 @@ class MacroRecorder:
             last_row = self.excel.get_last_row(sheet_test, column=column or None)
             print(f"  → 実際に取得できました: {last_row}行目")
             store_as = self._ask_store_as()
+            if store_as:
+                self.record_variable(store_as, last_row)
             step = {
                 "handler": "excel", "action": "get_last_row",
                 "params": {"sheet_name": sheet_param, "column": column or None},
@@ -672,6 +829,112 @@ class MacroRecorder:
             print("  → 登録しました。\n")
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠ {e}\n")
+
+    def _record_excel_get_last_column(self) -> None:
+        sheet_result = self._ask_sluttable_value("対象シート名")
+        if sheet_result is None:
+            print("  → キャンセルしました。\n")
+            return
+        sheet_test, sheet_param = sheet_result
+        row = self._ask("  対象の行番号(例: 1。空欄ならシート全体の最終列): ").strip()
+
+        try:
+            last_col = self.excel.get_last_column(sheet_test, row=row or None)
+            print(f"  → 実際に取得できました: {last_col or '(該当する列なし)'}列目")
+            store_as = self._ask_store_as()
+            if store_as:
+                self.record_variable(store_as, last_col)
+            step = {
+                "handler": "excel", "action": "get_last_column",
+                "params": {"sheet_name": sheet_param, "row": row or None},
+            }
+            if store_as:
+                step["store_as"] = store_as
+            self.steps.append(step)
+            print("  → 登録しました。\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+
+    def _ask_excel_dest_cell(self, sheet_test: str, sheet_param: str) -> tuple[str, str, dict | None] | None:
+        """貼り付け先の左上セルを聞く。直接指定のほか、「最終行の続き」
+        「最終列の続き」を基準にした指定にも対応する(戻り値: (実値, テンプレート値,
+        必要なら事前に挿入するget_last_row/get_last_column手順) または None=キャンセル)。
+        """
+        print("  貼り付け先の指定方法を選んでください:")
+        print("    1) セルを直接指定する(例: D1)")
+        print("    2) 最終行の続きに貼り付ける(列を指定)")
+        print("    3) 最終列の続きに貼り付ける(行を指定)")
+        basis = self._ask("  番号(空Enterで1)> ").strip() or "1"
+
+        if basis == "2":
+            col_raw = self._ask("  貼り付け先の列(例: D): ").strip()
+            try:
+                col_idx = int(col_raw) if col_raw.isdigit() else column_index_from_string(col_raw.upper())
+                col_letter = get_column_letter(col_idx)
+            except ValueError:
+                print("  → 列の指定が不正です。\n")
+                return None
+            col_scope = self._ask(
+                "  最終行を判定する基準列(空欄ならシート全体の最終行): "
+            ).strip()
+            offset_raw = self._ask("  最終行から何行後に貼り付けますか?(空Enterで1=次の行): ").strip()
+            try:
+                offset = int(offset_raw) if offset_raw else 1
+            except ValueError:
+                offset = 1
+            try:
+                current_last_row = self.excel.get_last_row(sheet_test, column=col_scope or None)
+            except Exception as e:  # noqa: BLE001
+                print(f"  ⚠ 最終行の取得に失敗しました: {e}\n")
+                return None
+            var_name = self._next_auto_var("last_row")
+            prereq_step = {
+                "handler": "excel", "action": "get_last_row",
+                "params": {"sheet_name": sheet_param, "column": col_scope or None},
+                "store_as": var_name,
+            }
+            self.record_variable(var_name, current_last_row)
+            dest_row_test = current_last_row + offset
+            print(f"  → 今の時点の最終行は{current_last_row}行目なので、"
+                  f"動作確認では{col_letter}{dest_row_test}に貼り付けます。")
+            return f"{col_letter}{dest_row_test}", f"{col_letter}{_offset_template(var_name, offset)}", prereq_step
+
+        if basis == "3":
+            row_raw = self._ask("  貼り付け先の行番号(例: 5): ").strip()
+            if not row_raw.isdigit():
+                print("  → 行番号を数字で入力してください。\n")
+                return None
+            offset_raw = self._ask("  最終列から何列後に貼り付けますか?(空Enterで1=次の列): ").strip()
+            try:
+                offset = int(offset_raw) if offset_raw else 1
+            except ValueError:
+                offset = 1
+            try:
+                current_last_col = self.excel.get_last_column(sheet_test, row=row_raw)
+            except Exception as e:  # noqa: BLE001
+                print(f"  ⚠ 最終列の取得に失敗しました: {e}\n")
+                return None
+            col_idx_base = column_index_from_string(current_last_col) if current_last_col else 0
+            if col_idx_base + offset < 1:
+                print("  → 指定したオフセットでは列がA列より前になります。\n")
+                return None
+            var_name = self._next_auto_var("last_col")
+            prereq_step = {
+                "handler": "excel", "action": "get_last_column",
+                "params": {"sheet_name": sheet_param, "row": int(row_raw)},
+                "store_as": var_name,
+            }
+            self.record_variable(var_name, current_last_col)
+            dest_col_test = get_column_letter(col_idx_base + offset)
+            print(f"  → 今の時点の最終列は{current_last_col or '(無し)'}なので、"
+                  f"動作確認では{dest_col_test}{row_raw}に貼り付けます。")
+            return f"{dest_col_test}{row_raw}", f"{_offset_template(var_name, offset)}{row_raw}", prereq_step
+
+        result = self._ask_sluttable_value("貼り付け先の左上セル(例: D1)")
+        if result is None:
+            return None
+        dest_test, dest_param = result
+        return dest_test, dest_param, None
 
     def _record_excel_copy_cell_range(self) -> None:
         sheet_result = self._ask_sluttable_value("対象シート名")
@@ -684,11 +947,12 @@ class MacroRecorder:
             print("  → キャンセルしました。\n")
             return
         src_test, src_param = src_result
-        dest_result = self._ask_sluttable_value("貼り付け先の左上セル(例: D1)")
+
+        dest_result = self._ask_excel_dest_cell(sheet_test, sheet_param)
         if dest_result is None:
             print("  → キャンセルしました。\n")
             return
-        dest_test, dest_param = dest_result
+        dest_test, dest_param, prereq_step = dest_result
 
         print("  貼り付け方法を選んでください:")
         print("    1) 値のみ貼り付け(数式は計算済みの値になる)")
@@ -700,6 +964,8 @@ class MacroRecorder:
         try:
             result = self.excel.copy_cell_range(sheet_test, src_test, dest_test, paste_type=paste_type)
             print(f"  → 実際にコピーできました: {result}")
+            if prereq_step:
+                self.steps.append(prereq_step)
             self.steps.append({
                 "handler": "excel", "action": "copy_cell_range",
                 "params": {
@@ -780,6 +1046,8 @@ class MacroRecorder:
             more = "..." if len(result) > 5 else ""
             print(f"  → 実際に取得できました({len(result)}件): {preview}{more}")
             store_as = self._ask_store_as()
+            if store_as:
+                self.record_variable(store_as, result)
             step = {
                 "handler": "excel", "action": "get_range_as_list",
                 "params": {"sheet_name": sheet_param, "cell_range": range_param},
@@ -819,6 +1087,8 @@ class MacroRecorder:
             names = self.excel.get_sheet_names()
             print(f"  → 実際に取得できました: {names}")
             store_as = self._ask_store_as()
+            if store_as:
+                self.record_variable(store_as, names)
             step = {"handler": "excel", "action": "get_sheet_names", "params": {}}
             if store_as:
                 step["store_as"] = store_as
@@ -867,6 +1137,8 @@ class MacroRecorder:
             address = self.excel.find_cell(sheet_test, value_test, column=column or None)
             print(f"  → 実際に見つかりました: {address}")
             store_as = self._ask_store_as()
+            if store_as:
+                self.record_variable(store_as, address)
             step = {
                 "handler": "excel", "action": "find_cell",
                 "params": {"sheet_name": sheet_param, "value": value_param, "column": column or None},
@@ -1075,6 +1347,8 @@ class MacroRecorder:
             count = self.pdf.get_page_count(in_test)
             print(f"  → 実際に取得できました: {count}ページ")
             store_as = self._ask_store_as()
+            if store_as:
+                self.record_variable(store_as, count)
             step = {"handler": "pdf", "action": "get_page_count", "params": {"input_path": in_param}}
             if store_as:
                 step["store_as"] = store_as
@@ -1393,6 +1667,8 @@ class MacroRecorder:
             )
             print(f"  → 実際に取得できました: {result[:150]!r}")
             store_as = self._ask_store_as()
+            if store_as:
+                self.record_variable(store_as, result)
             step = {
                 "handler": "pdf", "action": "extract_text_in_area",
                 "params": {
@@ -1552,6 +1828,8 @@ class MacroRecorder:
             text = self.browser.get_text_by_selector(selector)
             print(f"  → 実際に読み取れました: {text!r}")
             store_as = self._ask_store_as()
+            if store_as:
+                self.record_variable(store_as, text)
             step = {"handler": "browser", "action": "get_text_by_selector", "params": {"selector": selector}}
             if store_as:
                 step["store_as"] = store_as
@@ -1571,6 +1849,8 @@ class MacroRecorder:
             value = self.browser.get_attribute_by_selector(selector, attribute)
             print(f"  → 実際に読み取れました: {value!r}")
             store_as = self._ask_store_as()
+            if store_as:
+                self.record_variable(store_as, value)
             step = {
                 "handler": "browser", "action": "get_attribute_by_selector",
                 "params": {"selector": selector, "attribute": attribute},
@@ -1595,6 +1875,8 @@ class MacroRecorder:
             more = "..." if len(values) > 5 else ""
             print(f"  → 実際に読み取れました({len(values)}件): {preview}{more}")
             store_as = self._ask_store_as()
+            if store_as:
+                self.record_variable(store_as, values)
             step = {
                 "handler": "browser", "action": "get_text_list_by_selector",
                 "params": {"selector": selector},
@@ -1925,6 +2207,8 @@ class MacroRecorder:
             exists = self.explorer.path_exists(test_value)
             print(f"  → 実際に確認できました: {exists}")
             store_as = self._ask_store_as()
+            if store_as:
+                self.record_variable(store_as, exists)
             step = {"handler": "explorer", "action": "path_exists", "params": {"path": param_value}}
             if store_as:
                 step["store_as"] = store_as
@@ -1948,6 +2232,8 @@ class MacroRecorder:
             more = "..." if len(files) > 5 else ""
             print(f"  → 実際に取得できました({len(files)}件): {preview}{more}")
             store_as = self._ask_store_as()
+            if store_as:
+                self.record_variable(store_as, files)
             step = {
                 "handler": "explorer", "action": "list_files_in_folder",
                 "params": {"path": param_value, "pattern": pattern, "include_folders": include_folders},
@@ -2628,7 +2914,7 @@ class MacroRecorder:
             print("テキスト加工では何をしますか?")
             print("  1) 文字を探して切り出す")
             print("  2) 文字を置換する")
-            print("  3) 日付・時刻の一部を取得する")
+            print("  3) 日付・時刻を取得する(yyyyMMdd_hhmmss等、ファイル名にも使える書式)")
             print("  4) 文字をつなげる/付加する")
             print("  5) クリップボードにコピーする")
             print("  6) クリップボードから取得する")
@@ -2690,12 +2976,15 @@ class MacroRecorder:
         if end_marker:
             params["end_marker"] = end_marker
 
+        result = None
+        confirmed = False
         if test_text is not None:
             try:
                 result = self.text.cut_from_marker(
                     test_text, marker, include_marker=include, length=length, end_marker=end_marker
                 )
                 print(f"  → 動作確認できました。結果: {result[:100]!r}")
+                confirmed = True
             except Exception as e:  # noqa: BLE001
                 print(f"  ⚠ {e}")
                 if self._ask("  それでもこの手順として登録しますか? (y/N): ").lower() != "y":
@@ -2707,6 +2996,8 @@ class MacroRecorder:
         step = {"handler": "text", "action": "cut_from_marker", "params": params}
         if store_as:
             step["store_as"] = store_as
+            if confirmed:
+                self.record_variable(store_as, result)
         self.steps.append(step)
         print("  → 登録しました。\n")
 
@@ -2728,33 +3019,52 @@ class MacroRecorder:
         }
         if store_as:
             step["store_as"] = store_as
+            if test_text is not None:
+                self.record_variable(store_as, result)
         self.steps.append(step)
         print("  → 登録しました。\n")
 
     def _record_text_datetime(self) -> None:
-        print("  取得できる要素: year(西暦) / fiscal_year(年度) / month / day / hour / minute / second")
-        print("               / date(YYYY-MM-DD) / datetime(YYYY-MM-DD HH:MM:SS)")
-        component = self._ask("  取得する要素を入力してください: ").strip()
-        if not component:
-            print("  → 未入力のため、この手順は登録しませんでした。\n")
-            return
-        fy_month_raw = self._ask("  年度の開始月(空Enterで既定4月): ").strip()
+        print("  よく使う書式:")
+        print("    1) yyyyMMdd_hhmmss  (例: 20260830_143022。ファイル名の一意化に)")
+        print("    2) yyyyMMdd         (例: 20260830)")
+        print("    3) hhmmss           (例: 143022)")
+        print("    4) yyyy             (西暦年。例: 2026)")
+        print("    5) YYYY             (年度。例: 2025)")
+        print("    6) 自分で書式を入力する(yyyy/YYYY/MM/M/dd/d/hh/mm/ss を組み合わせ可)")
+        choice = self._ask("  番号(空Enterで1)> ").strip() or "1"
+        presets = {
+            "1": "yyyyMMdd_hhmmss", "2": "yyyyMMdd", "3": "hhmmss", "4": "yyyy", "5": "YYYY",
+        }
+        if choice == "6":
+            format_code = self._ask(
+                "  書式コードを入力してください(例: yyyy年MM月dd日): "
+            ).strip()
+            if not format_code:
+                print("  → 未入力のため、この手順は登録しませんでした。\n")
+                return
+        else:
+            format_code = presets.get(choice, "yyyyMMdd_hhmmss")
+
+        fy_month_raw = self._ask("  年度の開始月(YYYYを使わないなら無関係。空Enterで既定4月): ").strip()
         try:
             fy_month = int(fy_month_raw) if fy_month_raw else 4
         except ValueError:
             fy_month = 4
 
         try:
-            result = self.text.get_datetime_part(component, fiscal_year_start_month=fy_month)
+            result = self.text.format_now(format_code, fiscal_year_start_month=fy_month)
             print(f"  → 動作確認できました。結果: {result}")
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠ {e}\n")
             return
 
         store_as = self._ask_store_as()
+        if store_as:
+            self.record_variable(store_as, result)
         step = {
-            "handler": "text", "action": "get_datetime_part",
-            "params": {"component": component, "fiscal_year_start_month": fy_month},
+            "handler": "text", "action": "format_now",
+            "params": {"format_code": format_code, "fiscal_year_start_month": fy_month},
         }
         if store_as:
             step["store_as"] = store_as
@@ -2791,6 +3101,8 @@ class MacroRecorder:
         }
         if store_as:
             step["store_as"] = store_as
+            if not has_variable:
+                self.record_variable(store_as, result)
         self.steps.append(step)
         print("  → 登録しました。\n")
 
@@ -2813,9 +3125,12 @@ class MacroRecorder:
         print("  → 登録しました。\n")
 
     def _record_text_get_from_clipboard(self) -> None:
+        value = None
+        confirmed = False
         try:
             value = self.text.get_from_clipboard()
             print(f"  → 実際に取得できました: {value[:100]!r}")
+            confirmed = True
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠ {e}")
             if self._ask("  それでもこの手順として登録しますか? (y/N): ").lower() != "y":
@@ -2823,6 +3138,8 @@ class MacroRecorder:
                 return
 
         store_as = self._ask_store_as()
+        if store_as and confirmed:
+            self.record_variable(store_as, value)
         step = {"handler": "text", "action": "get_from_clipboard", "params": {}}
         if store_as:
             step["store_as"] = store_as
@@ -2866,6 +3183,7 @@ class MacroRecorder:
         self.steps.append({
             "handler": "list", "action": "create_empty", "params": {}, "store_as": store_as,
         })
+        self.record_variable(store_as, [])
         print(f"  → 登録しました(変数名: {store_as})。\n")
 
     def _record_list_append(self) -> None:
@@ -2943,6 +3261,7 @@ class MacroRecorder:
             print("  4) 変数に値を設定する(例: A = A + 1)")
             print("  5) 繰り返しを開始する(for)")
             print("  6) 繰り返しを終了する(next)")
+            print("  7) 変数の型を変換する(文字列/整数/小数)")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -2959,10 +3278,12 @@ class MacroRecorder:
                 self._record_control_for_start()
             elif choice == "6":
                 self._record_control_for_end()
+            elif choice == "7":
+                self._record_control_convert_type()
             elif choice == "0":
                 return
             else:
-                print("0〜6のいずれかを入力してください。\n")
+                print("0〜7のいずれかを入力してください。\n")
 
     def _record_control_label(self) -> None:
         name = self._ask("  このラベルの名前を入力してください(例: Label1): ").strip()
@@ -3029,6 +3350,30 @@ class MacroRecorder:
             "params": {"value": value}, "store_as": var_name,
         })
         print(f"  → 登録しました: {var_name} = {value}\n")
+
+    def _record_control_convert_type(self) -> None:
+        print("  Excelのセル値等は先頭が0の値(郵便番号等)を保持するため基本的に")
+        print("  文字列として扱われます。計算に使いたい場合や、逆に確実に文字列")
+        print("  として扱いたい場合に、変数の型を強制的に変換します。")
+        var_name = self._ask("  変換する変数名を入力してください(例: A): ").strip()
+        if not var_name:
+            print("  → キャンセルしました。\n")
+            return
+        print("  変換先の型を選んでください:")
+        print("    1) 文字列(str)")
+        print("    2) 整数(int)")
+        print("    3) 小数(float)")
+        type_choice = self._ask("  番号> ")
+        action = {"1": "to_str", "2": "to_int", "3": "to_float"}.get(type_choice)
+        if action is None:
+            print("  → 1〜3のいずれかを選んでください。この手順は登録しませんでした。\n")
+            return
+        value = "{{" + var_name + "}}"
+        self.steps.append({
+            "handler": "control", "action": action,
+            "params": {"value": value}, "store_as": var_name,
+        })
+        print(f"  → 登録しました: {var_name} を{action}で変換します\n")
 
     def _record_control_for_start(self) -> None:
         var_name = self._ask("  ループカウンタの変数名(空Enterで既定 'i'): ").strip() or "i"

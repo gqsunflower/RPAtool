@@ -9,6 +9,7 @@ config/backups/*
 !config/backups/.gitkeep
 logs/*.csv
 logs/*.xlsx
+logs/*.log
 logs/screenshots/*
 !logs/screenshots/.gitkeep
 workdir/
