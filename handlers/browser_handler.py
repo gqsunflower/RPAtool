@@ -404,9 +404,17 @@ class BrowserHandler:
             elements.sort(key=lambda el: 0 if label_of(el) == exact_text else 1)
         return elements
 
-    def click_by_text(self, text_hint: str, timeout: int = 10) -> str:
+    def click_by_text(
+        self, text_hint: str, timeout: int = 10, obstruction_wait_seconds: float = 0
+    ) -> str:
         """画面に表示されているであろう文字(ボタン/リンクのラベル)を手がかりにクリックする。
         CSSクラス名やid指定に依存しないため、多少のUI変更(見た目の微修正等)に強い。
+
+        obstruction_wait_seconds: 広告のポップアップ等、別の要素に覆われてクリックが
+        妨害された場合の対応。0(既定)なら妨害を検知した時点ですぐにエラーにする。
+        0より大きい値を指定すると、その秒数の間は1秒おきに自動で再試行しながら
+        待機する(いつ閉じられるか予測できないため、手動で閉じてもらうのを想定した
+        待機)。待機しても解消しなければエラーで停止する。
         """
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
@@ -424,18 +432,60 @@ class BrowserHandler:
                 f"'{text_hint}' という表示のボタン/リンクが見つかりませんでした"
             )
 
-        candidates = self._find_visible(xpath, exact_text=text_hint)
-        if not candidates:
-            raise ElementNotFoundError(
-                f"'{text_hint}' に一致する、現在表示されている要素が見つかりませんでした"
-            )
-
-        target = candidates[0]
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target)
-        target.click()
+        candidates = self._click_with_obstruction_wait(
+            driver,
+            lambda: self._find_visible(xpath, exact_text=text_hint),
+            obstruction_wait_seconds,
+            f"'{text_hint}' に一致する、現在表示されている要素",
+        )
         self._assert_still_on_site()
         logger.info("テキスト一致でクリックしました: '%s' (候補%d件中1件目)", text_hint, len(candidates))
         return f"clicked by text: {text_hint}"
+
+    def _click_with_obstruction_wait(
+        self,
+        driver,
+        locate_candidates,
+        obstruction_wait_seconds: float,
+        not_found_label: str,
+    ) -> list:
+        """候補要素を探して先頭をクリックする。広告等の別要素にクリックを
+        妨害された場合、obstruction_wait_seconds が0より大きければその秒数の間、
+        1秒おきに候補を再取得してクリックを再試行する(DOMが変わっても対応
+        できるよう、毎回locate_candidates()で探し直す)。要素が見つからない場合は
+        待機せずすぐにエラーにする(妨害待ちは「見えているが押せない」場合のみ)。
+        """
+        from selenium.common.exceptions import (
+            ElementClickInterceptedException,
+            ElementNotInteractableException,
+            StaleElementReferenceException,
+        )
+
+        deadline = time.monotonic() + obstruction_wait_seconds
+        while True:
+            candidates = locate_candidates()
+            if not candidates:
+                raise ElementNotFoundError(f"{not_found_label}が見つかりませんでした")
+            target = candidates[0]
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target)
+            try:
+                target.click()
+                return candidates
+            except (
+                ElementClickInterceptedException,
+                ElementNotInteractableException,
+                StaleElementReferenceException,
+            ) as e:
+                if obstruction_wait_seconds <= 0 or time.monotonic() >= deadline:
+                    suffix = (
+                        f"(手動で閉じるのを{obstruction_wait_seconds}秒待ちましたが解消しませんでした)"
+                        if obstruction_wait_seconds > 0 else ""
+                    )
+                    raise ElementNotFoundError(
+                        f"{not_found_label}は見つかりましたが、広告等の別の要素にクリックを"
+                        f"妨害されています{suffix}: {e}"
+                    ) from e
+                time.sleep(1.0)
 
     def _build_input_xpath(self, label_hint: str, tag: str) -> str:
         lit = _xpath_literal(label_hint)
@@ -640,12 +690,24 @@ class BrowserHandler:
     # UI変更に弱くなるため、まずは *_by_text 系を試し、それでも見つからない
     # ときだけこちらを使うことを推奨する。
 
-    def click_selector(self, selector: str) -> str:
+    def click_selector(self, selector: str, obstruction_wait_seconds: float = 0) -> str:
+        """obstruction_wait_seconds: click_by_textと同じ考え方で、広告等の別要素に
+        クリックを妨害された場合の最大待機秒数(0なら待機せずすぐにエラー)。
+        """
+        from selenium.common.exceptions import NoSuchElementException
+
         self._assert_still_on_site()
         driver = self._get_driver()
-        el = driver.find_element("css selector", selector)
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
-        el.click()
+
+        def _locate():
+            try:
+                return [driver.find_element("css selector", selector)]
+            except NoSuchElementException:
+                return []
+
+        self._click_with_obstruction_wait(
+            driver, _locate, obstruction_wait_seconds, f"セレクタ '{selector}' の要素"
+        )
         self._assert_still_on_site()
         return f"clicked: {selector}"
 
@@ -820,6 +882,293 @@ class BrowserHandler:
             el.send_keys(value)
         self._assert_still_on_site()
         return f"{len(form_values)} 項目を入力しました"
+
+    # ---------- 番号指定(インデックス)による操作・プレビュー ----------
+    # 表のセル、名前の無いボタン、カスタムデザインのトグル等、表示テキストでの
+    # 目印が取りづらい要素向けに、画面に今表示されている要素を種類ごとに
+    # 1番目から順に番号付けし、その番号を指定して操作する方式。
+    # list_*系で「今何番に何があるか」を事前にプレビューしてから、対応する
+    # *_by_index系(表はget_table_cell_text)で実際に操作・登録する、という
+    # 2段階の使い方を想定している。番号は呼び出すたびにその場で数え直すため、
+    # ページの内容が変わると対応がずれる可能性がある(プレビューした直後に
+    # 登録することを推奨)。
+
+    _CLICKABLE_XPATH = (
+        "//button | //a | //input[@type='submit' or @type='button'] | //*[@role='button']"
+    )
+    _INPUT_XPATH = (
+        "//input[not(@type='submit') and not(@type='button') and not(@type='checkbox') "
+        "and not(@type='radio') and not(@type='hidden')] | //textarea"
+    )
+    _CHECKBOX_XPATH = "//input[@type='checkbox']"
+    _TOGGLE_XPATH = "//*[@role='switch'] | //*[@aria-pressed]"
+    _DROPDOWN_XPATH = "//select"
+    _TABLE_XPATH = "//table"
+
+    @staticmethod
+    def _element_label(el) -> str:
+        """要素自身の「表示されているであろう文字」を、テキスト→value→aria-label→
+        titleの優先順で1つ取得する(見つからなければ空文字)。"""
+        return (el.text or el.get_attribute("value") or el.get_attribute("aria-label")
+                or el.get_attribute("title") or "").strip()
+
+    def _find_label_for(self, el) -> str:
+        """入力欄・チェックボックス等、自分自身に表示文字を持たない要素向けに、
+        aria-label/placeholder/title、または紐づく<label>から目印になりそうな
+        文字列を探す(見つからなければname属性、それも無ければ空文字)。"""
+        from selenium.webdriver.common.by import By
+        from selenium.common.exceptions import NoSuchElementException
+
+        for attr in ("aria-label", "placeholder", "title"):
+            value = el.get_attribute(attr)
+            if value and value.strip():
+                return value.strip()
+        driver = self._get_driver()
+        el_id = el.get_attribute("id")
+        if el_id:
+            try:
+                lbl = driver.find_element(By.XPATH, f"//label[@for={_xpath_literal(el_id)}]")
+                if lbl.text.strip():
+                    return lbl.text.strip()
+            except NoSuchElementException:
+                pass
+        try:
+            lbl = el.find_element(By.XPATH, "ancestor::label[1]")
+            if lbl.text.strip():
+                return lbl.text.strip()
+        except NoSuchElementException:
+            pass
+        return (el.get_attribute("name") or "").strip()
+
+    def _enumerate_visible(self, xpath: str) -> list:
+        """xpathに一致する、今画面に表示されている要素を出現順に取得する
+        (1番目からの番号付けは呼び出し側で行う)。"""
+        from selenium.webdriver.common.by import By
+
+        self._assert_still_on_site()
+        driver = self._get_driver()
+        return [el for el in driver.find_elements(By.XPATH, xpath) if el.is_displayed()]
+
+    def _nth_visible(self, xpath: str, index: int, kind_label: str):
+        """xpathに一致する表示中の要素のうち、index番目(1始まり)を返す。
+        範囲外ならエラーにする。"""
+        elements = self._enumerate_visible(xpath)
+        if not (1 <= index <= len(elements)):
+            raise ElementNotFoundError(
+                f"{kind_label}の{index}番目は存在しません"
+                f"(今表示されているのは{len(elements)}件です。一覧で番号を確認し直してください)"
+            )
+        return elements[index - 1]
+
+    # ---- ボタン/リンク(通常ボタン) ----
+
+    def list_clickable_elements(self) -> list[dict]:
+        """今画面に表示されているボタン/リンクを1番目から順に列挙する
+        (登録前のプレビュー用)。"""
+        elements = self._enumerate_visible(self._CLICKABLE_XPATH)
+        return [
+            {"index": i, "text": self._element_label(el), "tag": el.tag_name}
+            for i, el in enumerate(elements, start=1)
+        ]
+
+    def click_by_index(self, index: int, obstruction_wait_seconds: float = 0) -> str:
+        """list_clickable_elementsで確認した番号(1始まり)のボタン/リンクをクリックする。
+        obstruction_wait_secondsはclick_by_textと同じ(広告等に妨害された場合の
+        手動close待ちの最大秒数。0なら待機せずすぐにエラー)。
+        """
+        def _locate():
+            elements = self._enumerate_visible(self._CLICKABLE_XPATH)
+            if not (1 <= index <= len(elements)):
+                return []
+            return [elements[index - 1]]
+
+        driver = self._get_driver()
+        self._click_with_obstruction_wait(
+            driver, _locate, obstruction_wait_seconds, f"{index}番目のボタン/リンク"
+        )
+        self._assert_still_on_site()
+        return f"clicked by index: {index}"
+
+    # ---- 入力欄 ----
+
+    def list_input_elements(self) -> list[dict]:
+        """今画面に表示されている入力欄(input/textarea)を1番目から順に列挙する。"""
+        elements = self._enumerate_visible(self._INPUT_XPATH)
+        return [
+            {
+                "index": i,
+                "label": self._find_label_for(el),
+                "current_value": el.get_attribute("value") or "",
+                "type": el.get_attribute("type") or el.tag_name,
+            }
+            for i, el in enumerate(elements, start=1)
+        ]
+
+    def type_by_index(
+        self, index: int, value: str, clear_first: bool = True, press_enter: bool = False
+    ) -> str:
+        """list_input_elementsで確認した番号(1始まり)の入力欄に入力する。"""
+        self._assert_still_on_site()
+        target = self._nth_visible(self._INPUT_XPATH, index, "入力欄")
+        driver = self._get_driver()
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target)
+        if clear_first:
+            target.clear()
+        target.send_keys(value)
+        if press_enter:
+            from selenium.webdriver.common.keys import Keys
+            target.send_keys(Keys.RETURN)
+        self._assert_still_on_site()
+        suffix = " (Enterで送信)" if press_enter else ""
+        return f"typed into index {index}{suffix}"
+
+    # ---- チェックボックス ----
+
+    def list_checkbox_elements(self) -> list[dict]:
+        """今画面に表示されているチェックボックスを1番目から順に列挙する。
+        opacity:0等で見た目上隠されたカスタムデザインのチェックボックスは
+        「表示中」の判定から外れるため対象にならない(その場合は表示テキストでの
+        操作`check_checkbox_by_text`を使うこと)。"""
+        elements = self._enumerate_visible(self._CHECKBOX_XPATH)
+        return [
+            {"index": i, "label": self._find_label_for(el), "checked": el.is_selected()}
+            for i, el in enumerate(elements, start=1)
+        ]
+
+    def check_checkbox_by_index(self, index: int, checked: bool = True) -> str:
+        """list_checkbox_elementsで確認した番号(1始まり)のチェックボックスを
+        指定した状態にする。"""
+        self._assert_still_on_site()
+        target = self._nth_visible(self._CHECKBOX_XPATH, index, "チェックボックス")
+        driver = self._get_driver()
+        if target.is_selected() != checked:
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target)
+                target.click()
+            except Exception:  # noqa: BLE001
+                pass
+            if target.is_selected() != checked:
+                driver.execute_script("arguments[0].click();", target)
+        if target.is_selected() != checked:
+            raise VerificationFailedError(f"{index}番目のチェック状態を{checked}に変更できませんでした")
+        self._assert_still_on_site()
+        return f"checkbox index {index} -> {checked}"
+
+    # ---- トグルボタン(role=switch / aria-pressed) ----
+
+    def list_toggle_elements(self) -> list[dict]:
+        """今画面に表示されているトグルボタン(role=switch または aria-pressed属性を
+        持つ要素)を1番目から順に列挙する。"""
+        elements = self._enumerate_visible(self._TOGGLE_XPATH)
+        result = []
+        for i, el in enumerate(elements, start=1):
+            state = el.get_attribute("aria-checked") or el.get_attribute("aria-pressed") or ""
+            result.append({
+                "index": i,
+                "label": self._find_label_for(el) or self._element_label(el),
+                "on": state.lower() == "true",
+            })
+        return result
+
+    def toggle_by_index(self, index: int, on: bool = True) -> str:
+        """list_toggle_elementsで確認した番号(1始まり)のトグルボタンを
+        指定した状態(on/off)にする。"""
+        self._assert_still_on_site()
+        target = self._nth_visible(self._TOGGLE_XPATH, index, "トグルボタン")
+        driver = self._get_driver()
+
+        def _current_state() -> bool:
+            state = target.get_attribute("aria-checked") or target.get_attribute("aria-pressed") or ""
+            return state.lower() == "true"
+
+        if _current_state() != on:
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target)
+            target.click()
+            if _current_state() != on:
+                raise VerificationFailedError(f"{index}番目のトグル状態を{on}に変更できませんでした")
+        self._assert_still_on_site()
+        return f"toggle index {index} -> {on}"
+
+    # ---- プルダウン(<select>) ----
+
+    def list_dropdown_elements(self) -> list[dict]:
+        """今画面に表示されているプルダウン(<select>)を1番目から順に列挙する
+        (選択肢の一覧と、現在選ばれている項目も併せて返す)。"""
+        from selenium.webdriver.support.ui import Select
+
+        elements = self._enumerate_visible(self._DROPDOWN_XPATH)
+        result = []
+        for i, el in enumerate(elements, start=1):
+            select = Select(el)
+            options = [o.text.strip() for o in select.options]
+            selected = [o.text.strip() for o in select.all_selected_options]
+            result.append({
+                "index": i,
+                "label": self._find_label_for(el),
+                "options": options,
+                "selected": selected[0] if selected else "",
+            })
+        return result
+
+    def select_by_index(self, index: int, option_text: str) -> str:
+        """list_dropdown_elementsで確認した番号(1始まり)のプルダウンから、
+        表示文字が一致する選択肢を選ぶ。"""
+        from selenium.webdriver.support.ui import Select
+
+        self._assert_still_on_site()
+        target = self._nth_visible(self._DROPDOWN_XPATH, index, "プルダウン")
+        select = Select(target)
+        options = [o.text.strip() for o in select.options]
+        exact = [o for o in options if o == option_text]
+        if exact:
+            select.select_by_visible_text(exact[0])
+        else:
+            partial = [o for o in options if option_text in o]
+            if not partial:
+                raise ElementNotFoundError(
+                    f"{index}番目のプルダウンの中に '{option_text}' が見つかりませんでした"
+                    f"(選択肢: {options})"
+                )
+            select.select_by_visible_text(partial[0])
+        self._assert_still_on_site()
+        return f"selected index {index} = {option_text}"
+
+    # ---- 表(テーブル) ----
+
+    def list_tables(self) -> list[dict]:
+        """今画面に表示されている表(<table>)を1番目から順に列挙し、行数・列数と
+        先頭行のセルのプレビューを返す(どの表か見分けるための参考情報)。"""
+        elements = self._enumerate_visible(self._TABLE_XPATH)
+        result = []
+        for i, table_el in enumerate(elements, start=1):
+            rows = table_el.find_elements("xpath", ".//tr")
+            row_count = len(rows)
+            col_count = 0
+            preview_cells: list[str] = []
+            if rows:
+                cells = rows[0].find_elements("xpath", "./th | ./td")
+                col_count = len(cells)
+                preview_cells = [c.text.strip() for c in cells[:4]]
+            result.append({"index": i, "rows": row_count, "columns": col_count, "preview": preview_cells})
+        return result
+
+    def get_table_cell_text(self, table_index: int, row: int, column: int) -> str:
+        """table_index番目(1始まり)の表の、row行目・column列目(いずれも1始まり)の
+        セルの文字を取得する。行ごとにセル数が異なる場合がある(colspan等)ため、
+        事前にlist_tablesで大まかな行数・列数を確認しておくこと。"""
+        table_el = self._nth_visible(self._TABLE_XPATH, table_index, "表")
+        rows = table_el.find_elements("xpath", ".//tr")
+        if not (1 <= row <= len(rows)):
+            raise ElementNotFoundError(
+                f"{table_index}番目の表の{row}行目は存在しません(全{len(rows)}行)"
+            )
+        cells = rows[row - 1].find_elements("xpath", "./th | ./td")
+        if not (1 <= column <= len(cells)):
+            raise ElementNotFoundError(
+                f"{table_index}番目の表の{row}行目に{column}列目は存在しません"
+                f"(この行は{len(cells)}列です)"
+            )
+        return cells[column - 1].text.strip()
 
     # ---------- 画面をPDFとして保存(印刷) ----------
 

@@ -87,6 +87,7 @@ DOMAIN_ACTIONS = {
         "画面から文字を読み取る", "画面から属性値を読み取る", "画面から文字のリストを読み取る",
         "チェックボックスをON/OFFする",
         "ウィンドウサイズを指定する", "ウィンドウ位置を指定する", "表示倍率(ズーム)を指定する",
+        "番号指定で操作する(表/ボタン/入力欄/チェック/トグル/プルダウン)",
     ],
     "explorer": [
         "パスを開く", "フォルダを作成する", "ファイルを移動する", "ファイルをコピーする",
@@ -1963,9 +1964,17 @@ class RecorderApp(_AppBase):
             )
             field = ValueSlotField(f, "押したいボタン/リンクの表示文字")
             field.pack(fill="x", pady=4)
+            obstruction_field = PlainField(
+                f, "広告等に妨害された場合、手動で閉じるのを待つ最大秒数(空欄で待機しない)", width=10,
+            )
+            obstruction_field.pack(fill="x", pady=4)
 
             def on_submit():
                 text_test, text_param, _ = field.get()
+                try:
+                    obstruction_wait = float(obstruction_field.get().strip() or "0")
+                except ValueError:
+                    obstruction_wait = 0
                 try:
                     self.recorder.browser.click_by_text(text_test)
                     self.log(f"→ '{text_test}' をクリックできました")
@@ -1973,7 +1982,7 @@ class RecorderApp(_AppBase):
                     retry_cfg = self._ask_retry()
                     self.register_step({
                         "handler": "browser", "action": "click_by_text",
-                        "params": {"text_hint": text_param},
+                        "params": {"text_hint": text_param, "obstruction_wait_seconds": obstruction_wait},
                         "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
                     })
                 except ElementNotFoundError as e:
@@ -1989,7 +1998,7 @@ class RecorderApp(_AppBase):
                             retry_cfg = self._ask_retry()
                             self.register_step({
                                 "handler": "browser", "action": "click_selector",
-                                "params": {"selector": selector},
+                                "params": {"selector": selector, "obstruction_wait_seconds": obstruction_wait},
                                 "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
                             })
                         except Exception as e2:  # noqa: BLE001
@@ -2311,6 +2320,264 @@ class RecorderApp(_AppBase):
                     self.log(f"⚠ {e}")
 
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "番号指定で操作する(表/ボタン/入力欄/チェック/トグル/プルダウン)":
+            ttk.Label(
+                f, text="表示文字での目印が使いにくい場合向け。まず一覧を取得して"
+                        "プレビューし、番号を選んでから登録します。",
+                foreground="#557", justify="left",
+            ).pack(anchor="w", pady=(0, 6))
+
+            kinds = {
+                "表のセルを読み取る": "table",
+                "ボタン/リンクをクリックする": "click",
+                "入力欄に入力する": "input",
+                "チェックボックスをON/OFFする": "checkbox",
+                "トグルボタンをON/OFFする": "toggle",
+                "プルダウンから選択する": "select",
+            }
+            ttk.Label(f, text="操作の種類:").pack(anchor="w")
+            kind_combo = ttk.Combobox(f, state="readonly", values=list(kinds.keys()))
+            kind_combo.current(0)
+            kind_combo.pack(fill="x", pady=(0, 8))
+
+            sub_frame = ttk.Frame(f)
+            sub_frame.pack(fill="both", expand=True)
+
+            def build_sub(*_args):
+                for child in sub_frame.winfo_children():
+                    child.destroy()
+                self._build_web_index_kind(sub_frame, kinds[kind_combo.get()])
+
+            kind_combo.bind("<<ComboboxSelected>>", build_sub)
+            build_sub()
+
+    def _build_web_index_kind(self, parent: ttk.Frame, kind: str) -> None:
+        """番号指定操作の一覧プレビュー(Listbox)+ 種類ごとの入力欄 + 登録ボタンを作る。"""
+        listbox = tk.Listbox(parent, height=8, width=75)
+        listbox.pack(fill="both", expand=True, pady=(0, 6))
+        items: list[dict] = []
+
+        list_fns: dict[str, tuple] = {
+            "table": (
+                self.recorder.browser.list_tables,
+                lambda t: f"{t['index']}. {t['rows']}行 x {t['columns']}列"
+                          f"(先頭行: {', '.join(t['preview'])})",
+            ),
+            "click": (
+                self.recorder.browser.list_clickable_elements,
+                lambda el: f"{el['index']}. [{el['tag']}] {el['text'] or '(表示文字なし)'}",
+            ),
+            "input": (
+                self.recorder.browser.list_input_elements,
+                lambda el: f"{el['index']}. [{el['type']}] {el['label'] or '(目印なし)'}"
+                           f" (現在の値: {el['current_value']!r})",
+            ),
+            "checkbox": (
+                self.recorder.browser.list_checkbox_elements,
+                lambda el: f"{el['index']}. {el['label'] or '(目印なし)'}"
+                           f" (現在: {'ON' if el['checked'] else 'OFF'})",
+            ),
+            "toggle": (
+                self.recorder.browser.list_toggle_elements,
+                lambda el: f"{el['index']}. {el['label'] or '(目印なし)'}"
+                           f" (現在: {'ON' if el['on'] else 'OFF'})",
+            ),
+            "select": (
+                self.recorder.browser.list_dropdown_elements,
+                lambda el: f"{el['index']}. {el['label'] or '(目印なし)'}"
+                           f" 選択肢: {', '.join(el['options'])} (現在: {el['selected']})",
+            ),
+        }
+        list_fn, describe = list_fns[kind]
+
+        def refresh_list():
+            listbox.delete(0, "end")
+            items.clear()
+            try:
+                result = list_fn()
+            except Exception as e:  # noqa: BLE001
+                self.log(f"⚠ 一覧の取得に失敗しました: {e}")
+                return
+            items.extend(result)
+            if not items:
+                listbox.insert("end", "(該当する要素が見つかりませんでした)")
+                return
+            for item in items:
+                listbox.insert("end", describe(item))
+
+        ttk.Button(parent, text="一覧を取得(プレビュー)", command=refresh_list).pack(anchor="w")
+        refresh_list()
+
+        extra_frame = ttk.Frame(parent)
+        extra_frame.pack(fill="x", pady=6)
+
+        def selected_index() -> int | None:
+            sel = listbox.curselection()
+            if not sel or not items:
+                self.log("⚠ 一覧から対象を選んでください")
+                return None
+            return items[sel[0]]["index"]
+
+        if kind == "table":
+            row_field = PlainField(extra_frame, "何行目を読み取りますか?(1始まり)", width=10)
+            row_field.pack(fill="x", pady=2)
+            col_field = PlainField(extra_frame, "何列目を読み取りますか?(1始まり)", width=10)
+            col_field.pack(fill="x", pady=2)
+
+            def on_submit():
+                idx = selected_index()
+                if idx is None:
+                    return
+                try:
+                    row, col = int(row_field.get()), int(col_field.get())
+                except ValueError:
+                    self.log("⚠ 行・列は数字で入力してください")
+                    return
+                try:
+                    value = self.recorder.browser.get_table_cell_text(idx, row, col)
+                    self.log(f"→ プレビュー(実際に取得できた文字): {value!r}")
+                    store_as = self._ask_store_as()
+                    step = {
+                        "handler": "browser", "action": "get_table_cell_text",
+                        "params": {"table_index": idx, "row": row, "column": col},
+                    }
+                    if store_as:
+                        step["store_as"] = store_as
+                    self.register_step(step, value)
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(parent, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif kind == "click":
+            obstruction_field = PlainField(
+                extra_frame, "広告等に妨害された場合、手動で閉じるのを待つ最大秒数(空欄で待機しない)",
+                width=10,
+            )
+            obstruction_field.pack(fill="x", pady=2)
+
+            def on_submit():
+                idx = selected_index()
+                if idx is None:
+                    return
+                try:
+                    obstruction_wait = float(obstruction_field.get().strip() or "0")
+                except ValueError:
+                    obstruction_wait = 0
+                try:
+                    self.recorder.browser.click_by_index(idx)
+                    self.log(f"→ 実際に{idx}番目をクリックして確認できました")
+                    verify_cfg = self._ask_verify()
+                    retry_cfg = self._ask_retry()
+                    self.register_step({
+                        "handler": "browser", "action": "click_by_index",
+                        "params": {"index": idx, "obstruction_wait_seconds": obstruction_wait},
+                        "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(parent, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif kind == "input":
+            value_field = ValueSlotField(extra_frame, "入力する値")
+            value_field.pack(fill="x", pady=2)
+            enter_field = BoolField(extra_frame, "入力後にEnterキーで送信する")
+            enter_field.pack(anchor="w", pady=2)
+
+            def on_submit():
+                idx = selected_index()
+                if idx is None:
+                    return
+                value_test, value_param, _ = value_field.get()
+                press_enter = enter_field.get()
+                try:
+                    self.recorder.browser.type_by_index(idx, value_test, press_enter=press_enter)
+                    self.log(f"→ 実際に{idx}番目へ入力して確認できました")
+                    verify_cfg = self._ask_verify()
+                    retry_cfg = self._ask_retry()
+                    self.register_step({
+                        "handler": "browser", "action": "type_by_index",
+                        "params": {"index": idx, "value": value_param, "press_enter": press_enter},
+                        "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(parent, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif kind == "checkbox":
+            checked_field = BoolField(extra_frame, "チェックを入れる(オフでチェックを外す)", default=True)
+            checked_field.pack(anchor="w", pady=2)
+
+            def on_submit():
+                idx = selected_index()
+                if idx is None:
+                    return
+                checked = checked_field.get()
+                try:
+                    self.recorder.browser.check_checkbox_by_index(idx, checked=checked)
+                    self.log(f"→ 実際に{idx}番目を{checked}にできました")
+                    verify_cfg = self._ask_verify()
+                    retry_cfg = self._ask_retry()
+                    self.register_step({
+                        "handler": "browser", "action": "check_checkbox_by_index",
+                        "params": {"index": idx, "checked": checked},
+                        "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(parent, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif kind == "toggle":
+            on_field = BoolField(extra_frame, "ONにする(オフでOFFにする)", default=True)
+            on_field.pack(anchor="w", pady=2)
+
+            def on_submit():
+                idx = selected_index()
+                if idx is None:
+                    return
+                on = on_field.get()
+                try:
+                    self.recorder.browser.toggle_by_index(idx, on=on)
+                    self.log(f"→ 実際に{idx}番目を{on}にできました")
+                    verify_cfg = self._ask_verify()
+                    retry_cfg = self._ask_retry()
+                    self.register_step({
+                        "handler": "browser", "action": "toggle_by_index",
+                        "params": {"index": idx, "on": on},
+                        "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(parent, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif kind == "select":
+            option_field = PlainField(extra_frame, "選択したい選択肢の表示文字", width=30)
+            option_field.pack(fill="x", pady=2)
+
+            def on_submit():
+                idx = selected_index()
+                if idx is None:
+                    return
+                option_text = option_field.get()
+                try:
+                    self.recorder.browser.select_by_index(idx, option_text)
+                    self.log(f"→ 実際に{idx}番目で '{option_text}' を選択できました")
+                    verify_cfg = self._ask_verify()
+                    retry_cfg = self._ask_retry()
+                    self.register_step({
+                        "handler": "browser", "action": "select_by_index",
+                        "params": {"index": idx, "option_text": option_text},
+                        "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(parent, text="動作確認して登録", command=on_submit).pack(pady=6)
 
     def _show_web_candidates(self) -> None:
         try:

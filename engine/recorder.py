@@ -176,6 +176,21 @@ class MacroRecorder:
             return {"type": "url_changes", "timeout": 10}
         return {"type": "none"}
 
+    def _ask_obstruction_wait(self) -> float:
+        """広告のポップアップ等、別の要素にクリックが妨害される可能性がある操作かを聞き、
+        手動で閉じるのを待つ最大秒数を設定する(既定は待機せず即エラー)。
+        """
+        raw = self._ask(
+            "  広告等の別要素にクリックが妨害される可能性がありますか?"
+            " 手動で閉じるのを待つ最大秒数を入力してください(不要ならそのままEnter): "
+        ).strip()
+        if not raw:
+            return 0
+        try:
+            return max(float(raw), 0)
+        except ValueError:
+            return 0
+
     def _ask_retry(self) -> dict:
         """一時的な読み込み遅延などで失敗しやすい操作かどうかを聞き、
         自動リトライ回数を設定する。ほぼ確実に成功する操作は0のままでよい。
@@ -1703,6 +1718,8 @@ class MacroRecorder:
             print("  10) ウィンドウサイズを指定する(pyautogui併用時の座標合わせ用)")
             print("  11) ウィンドウ位置を指定する(pyautogui併用時の座標合わせ用)")
             print("  12) 表示倍率(ズーム)を指定する")
+            print("  13) 番号指定で操作する(表のセル読み取り・ボタン/入力欄/")
+            print("      チェックボックス/トグル/プルダウンをプレビューして選ぶ)")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -1731,10 +1748,258 @@ class MacroRecorder:
                 self._record_set_window_position()
             elif choice == "12":
                 self._record_set_zoom()
+            elif choice == "13":
+                self._record_index_menu()
             elif choice == "0":
                 return
             else:
-                print("0〜12のいずれかを入力してください。\n")
+                print("0〜13のいずれかを入力してください。\n")
+
+    # ---------- 番号指定(インデックス)によるプレビュー付き操作 ----------
+
+    def _pick_index(self, items: list[dict], describe) -> int | None:
+        """list_*系の戻り値を describe(item)->str で整形して一覧表示し、
+        番号を選んでもらう。キャンセル(空Enter)や無効な入力ならNoneを返す。
+        """
+        if not items:
+            print("  (該当する要素が見つかりませんでした)\n")
+            return None
+        for item in items:
+            print(f"  {item['index']}. {describe(item)}")
+        raw = self._ask("  番号(空Enterでキャンセル)> ").strip()
+        if not raw:
+            return None
+        try:
+            idx = int(raw)
+        except ValueError:
+            print("  数字で入力してください。\n")
+            return None
+        if not any(it["index"] == idx for it in items):
+            print("  その番号は一覧にありません。\n")
+            return None
+        return idx
+
+    def _record_index_menu(self) -> None:
+        while True:
+            print("番号指定では何を操作しますか?"
+                  "(表示テキストでの目印が使いにくい場合向け。まず一覧をプレビューしてから選びます)")
+            print("  1) 表のセルを読み取る")
+            print("  2) ボタン/リンクをクリックする")
+            print("  3) 入力欄に入力する")
+            print("  4) チェックボックスをON/OFFする")
+            print("  5) トグルボタンをON/OFFする")
+            print("  6) プルダウンから選択する")
+            print("  0) 戻る")
+            choice = self._ask("番号> ")
+            print()
+
+            if choice == "1":
+                self._record_index_table_cell()
+            elif choice == "2":
+                self._record_index_click()
+            elif choice == "3":
+                self._record_index_type()
+            elif choice == "4":
+                self._record_index_checkbox()
+            elif choice == "5":
+                self._record_index_toggle()
+            elif choice == "6":
+                self._record_index_select()
+            elif choice == "0":
+                return
+            else:
+                print("0〜6のいずれかを入力してください。\n")
+
+    def _record_index_table_cell(self) -> None:
+        try:
+            tables = self.browser.list_tables()
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+            return
+        table_idx = self._pick_index(
+            tables,
+            lambda t: f"{t['rows']}行 x {t['columns']}列(先頭行のプレビュー: {', '.join(t['preview'])})",
+        )
+        if table_idx is None:
+            print("  → キャンセルしました。\n")
+            return
+        row_raw = self._ask("  何行目を読み取りますか?(1始まり): ").strip()
+        col_raw = self._ask("  何列目を読み取りますか?(1始まり): ").strip()
+        if not row_raw.isdigit() or not col_raw.isdigit():
+            print("  → 行・列は数字で入力してください。この手順は登録しませんでした。\n")
+            return
+        row, col = int(row_raw), int(col_raw)
+        try:
+            value = self.browser.get_table_cell_text(table_idx, row, col)
+            print(f"  → プレビュー(実際に取得できた文字): {value!r}")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+            return
+        if self._ask("  この内容で登録しますか? (Y/n): ").strip().lower() == "n":
+            print("  → 登録しませんでした。\n")
+            return
+        store_as = self._ask_store_as()
+        step = {
+            "handler": "browser", "action": "get_table_cell_text",
+            "params": {"table_index": table_idx, "row": row, "column": col},
+        }
+        if store_as:
+            step["store_as"] = store_as
+            self.record_variable(store_as, value)
+        self.steps.append(step)
+        print("  → 登録しました。\n")
+
+    def _record_index_click(self) -> None:
+        try:
+            elements = self.browser.list_clickable_elements()
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+            return
+        idx = self._pick_index(elements, lambda el: f"[{el['tag']}] {el['text'] or '(表示文字なし)'}")
+        if idx is None:
+            print("  → キャンセルしました。\n")
+            return
+        try:
+            self.browser.click_by_index(idx)
+            print(f"  → 実際に{idx}番目をクリックして確認できました。")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}")
+            if self._ask("  それでもこの手順として登録しますか? (y/N): ").lower() != "y":
+                print("  → 登録しませんでした。\n")
+                return
+        verify_cfg = self._ask_verification()
+        retry_cfg = self._ask_retry()
+        obstruction_wait = self._ask_obstruction_wait()
+        self.steps.append({
+            "handler": "browser", "action": "click_by_index",
+            "params": {"index": idx, "obstruction_wait_seconds": obstruction_wait},
+            "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
+        })
+        print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+
+    def _record_index_type(self) -> None:
+        try:
+            elements = self.browser.list_input_elements()
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+            return
+        idx = self._pick_index(
+            elements,
+            lambda el: f"[{el['type']}] {el['label'] or '(目印なし)'} (現在の値: {el['current_value']!r})",
+        )
+        if idx is None:
+            print("  → キャンセルしました。\n")
+            return
+        result = self._ask_sluttable_value(f"{idx}番目の入力欄に入力する値")
+        if result is None:
+            print("  → キャンセルしました。\n")
+            return
+        test_v, param_v = result
+        press_enter = self._ask("  入力後にEnterキーで送信しますか? (y/N): ").lower() == "y"
+        try:
+            self.browser.type_by_index(idx, test_v, press_enter=press_enter)
+            print(f"  → 実際に{idx}番目へ入力して確認できました。")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+            return
+        verify_cfg = self._ask_verification()
+        retry_cfg = self._ask_retry()
+        self.steps.append({
+            "handler": "browser", "action": "type_by_index",
+            "params": {"index": idx, "value": param_v, "press_enter": press_enter},
+            "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
+        })
+        print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+
+    def _record_index_checkbox(self) -> None:
+        try:
+            elements = self.browser.list_checkbox_elements()
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+            return
+        idx = self._pick_index(
+            elements,
+            lambda el: f"{el['label'] or '(目印なし)'} (現在: {'ON' if el['checked'] else 'OFF'})",
+        )
+        if idx is None:
+            print("  → キャンセルしました。\n")
+            return
+        checked = self._ask("  チェックを入れますか(N=外す)? (Y/n): ").strip().lower() != "n"
+        try:
+            self.browser.check_checkbox_by_index(idx, checked=checked)
+            print(f"  → 実際に{idx}番目を{checked}にできました。")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+            return
+        verify_cfg = self._ask_verification()
+        retry_cfg = self._ask_retry()
+        self.steps.append({
+            "handler": "browser", "action": "check_checkbox_by_index",
+            "params": {"index": idx, "checked": checked},
+            "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
+        })
+        print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+
+    def _record_index_toggle(self) -> None:
+        try:
+            elements = self.browser.list_toggle_elements()
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+            return
+        idx = self._pick_index(
+            elements,
+            lambda el: f"{el['label'] or '(目印なし)'} (現在: {'ON' if el['on'] else 'OFF'})",
+        )
+        if idx is None:
+            print("  → キャンセルしました。\n")
+            return
+        on = self._ask("  ONにしますか(N=OFF)? (Y/n): ").strip().lower() != "n"
+        try:
+            self.browser.toggle_by_index(idx, on=on)
+            print(f"  → 実際に{idx}番目を{on}にできました。")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+            return
+        verify_cfg = self._ask_verification()
+        retry_cfg = self._ask_retry()
+        self.steps.append({
+            "handler": "browser", "action": "toggle_by_index",
+            "params": {"index": idx, "on": on},
+            "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
+        })
+        print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+
+    def _record_index_select(self) -> None:
+        try:
+            elements = self.browser.list_dropdown_elements()
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+            return
+        idx = self._pick_index(
+            elements,
+            lambda el: (
+                f"{el['label'] or '(目印なし)'} 選択肢: {', '.join(el['options'])}"
+                f" (現在: {el['selected']})"
+            ),
+        )
+        if idx is None:
+            print("  → キャンセルしました。\n")
+            return
+        option_text = self._ask("  選択したい項目の表示文字を入力してください: ").strip()
+        try:
+            self.browser.select_by_index(idx, option_text)
+            print(f"  → 実際に{idx}番目で '{option_text}' を選択できました。")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+            return
+        verify_cfg = self._ask_verification()
+        retry_cfg = self._ask_retry()
+        self.steps.append({
+            "handler": "browser", "action": "select_by_index",
+            "params": {"index": idx, "option_text": option_text},
+            "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
+        })
+        print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
 
     def _record_set_window_size(self) -> None:
         print("  ピクセルで指定するか、画面全体に対する割合(%)で指定するか選べます。")
@@ -1938,9 +2203,10 @@ class MacroRecorder:
             print(f"  → 実際に '{text_hint}' をクリックして確認できました。")
             verify_cfg = self._ask_verification()
             retry_cfg = self._ask_retry()
+            obstruction_wait = self._ask_obstruction_wait()
             self.steps.append({
                 "handler": "browser", "action": "click_by_text",
-                "params": {"text_hint": text_hint},
+                "params": {"text_hint": text_hint, "obstruction_wait_seconds": obstruction_wait},
                 "verify": verify_cfg, "verify_skip": False,
                 "retry": retry_cfg,
             })
@@ -1957,9 +2223,10 @@ class MacroRecorder:
                     print(f"  → CSSセレクタ '{selector}' でクリックを確認できました。")
                     verify_cfg = self._ask_verification()
                     retry_cfg = self._ask_retry()
+                    obstruction_wait = self._ask_obstruction_wait()
                     self.steps.append({
                         "handler": "browser", "action": "click_selector",
-                        "params": {"selector": selector},
+                        "params": {"selector": selector, "obstruction_wait_seconds": obstruction_wait},
                         "verify": verify_cfg, "verify_skip": False,
                         "retry": retry_cfg,
                     })
@@ -1971,9 +2238,10 @@ class MacroRecorder:
             if self._ask("  それでもこの手順として登録しますか? (y/N): ").lower() == "y":
                 verify_cfg = self._ask_verification()
                 retry_cfg = self._ask_retry()
+                obstruction_wait = self._ask_obstruction_wait()
                 self.steps.append({
                     "handler": "browser", "action": "click_by_text",
-                    "params": {"text_hint": text_hint},
+                    "params": {"text_hint": text_hint, "obstruction_wait_seconds": obstruction_wait},
                     "verify": verify_cfg, "verify_skip": False,
                     "retry": retry_cfg,
                 })

@@ -77,6 +77,15 @@
   **一覧・表の1列を丸ごと読み取る**(`get_text_list_by_selector`。一致するすべての要素の文字を
   リストとして取得し、for繰り返し構文と組み合わせられる)、**チェックボックスのON/OFF**
   (`check_checkbox_by_text`。ラベルの表示文字を手がかりに探す)にも対応しています。
+
+  **広告のポップアップ等でクリックが妨害された場合の待機**(`click_by_text`/`click_selector`の
+  `obstruction_wait_seconds`)にも対応しています。相手サイトに予期しない広告が出て
+  クリックしたい要素の上に重なってしまうと、通常はその場でエラーになりますが、
+  `obstruction_wait_seconds`に0より大きい秒数を指定しておくと、妨害を検知してから
+  その秒数までは1秒おきに自動で再試行しながら待機します(広告はいつ閉じられるか
+  予測できないため、手動で閉じてもらうのを待つ想定)。指定した時間内に解消しなければ
+  エラーで停止します(既定は0=待機せずすぐにエラー)。レコーダーの「クリックする」で
+  この秒数を設定できます。
   チェックボックスは、本体の`<input>`を`opacity:0`等で見た目上隠し`::before`等の疑似要素で
   描画するカスタムデザイン(よくあるスタイル付きチェックボックス)にも対応しています
   (紐づく`<label>`への通常クリックを試し、それでも状態が変わらない場合はJavaScriptで
@@ -102,6 +111,36 @@
   pyautoguiの座標・領域指定と厳密に一致させたい場合は、割合ではなく、
   pyautoguiが返す解像度(デスクトップ操作の`get_screen_size`)を基準にピクセル値で
   指定するか、Windows側のディスプレイ拡大率を100%にしておくことを推奨します。
+
+  **番号指定(インデックス)による操作**にも対応しています。表示文字やラベルでの
+  目印が使いにくい場合(同じ表示文字のボタンが複数ある、ラベルが付いていない入力欄、
+  表の特定のセルを読み取りたい、等)向けの3つ目の手がかりで、`click_by_text`等の
+  「表示文字」・`click_selector`等の「CSSセレクタ」に続く選択肢です。まず一覧を
+  取得して**登録前にプレビューで確認してから**番号を指定して登録できます。
+  レコーダーのWebメニュー「番号指定で操作する」(CLI)/「番号指定で操作する
+  (表/ボタン/入力欄/チェック/トグル/プルダウン)」(GUI)から使えます。
+  - `list_tables`/`get_table_cell_text(table_index, row, column)`: 画面中の
+    `<table>`を先頭から1始まりで数え、指定した表の指定行・指定列のセルの文字を
+    取得します(`colspan`のある行は実際に描画されているセル数で数えるため、
+    列がずれて見える場合があります。プレビューで実際の値を確認してから登録してください)。
+  - `list_clickable_elements`/`click_by_index(index)`: button/a/input[submit,button]/
+    role=buttonを画面に表示されている順に1始まりで数え、指定した番号の要素をクリックします。
+  - `list_input_elements`/`type_by_index(index, value)`: テキスト系の入力欄(チェックボックス・
+    ラジオボタンを除く)を1始まりで数え、指定した番号の欄に入力します。
+  - `list_checkbox_elements`/`check_checkbox_by_index(index, checked)`、
+    `list_toggle_elements`/`toggle_by_index(index, on)`: チェックボックス、および
+    `role="switch"`やARIA属性(`aria-pressed`)で作られたトグルボタンを、それぞれ
+    1始まりで数えてON/OFFします。
+  - `list_dropdown_elements`/`select_by_index(index, option_text)`: `<select>`を
+    1始まりで数え、指定した番号のドロップダウンから表示文字で選択肢を選びます。
+
+  いずれも**1始まり(Excelのセル参照と同じ考え方)**で、`list`側の呼び出しのたびに
+  画面から要素を再取得するため、直前の操作で画面の内容が変わっていても番号がずれにくい
+  設計です。ただし番号は「今の画面に表示されている順序」に依存するため、サイト側の
+  レイアウト変更で要素の増減・並び替えが起きると意図しない番号を指してしまう可能性が
+  あります(表示文字・CSSセレクタでの指定より変更に弱いトレードオフ)。可能であれば
+  表示文字・CSSセレクタでの指定を優先し、それらで特定しづらい場合の最終手段として
+  使うことを推奨します。
 - **エクスプローラー**(標準ライブラリのみ): 指定パスを開く・新規フォルダ作成・ファイル/フォルダの
   移動・コピー・名前変更に対応しています。移動・コピー・名前変更の先に同名のものが
   既にある場合は、明示的に許可しない限り上書きしません(誤ってデータを消さないための
@@ -386,7 +425,7 @@ Webサイト操作は最初にサイトを開いたときだけ選択が必要�
 | PDF | ページ数を取得する | `get_page_count` |
 | PDF | 表をCSVとして抽出する | `extract_tables`。罫線のある表組みをpdfplumberで検出 |
 | PDF | 埋め込み画像を抽出する | `extract_images`。写真・署名画像等をファイルとして書き出す(追加依存不要) |
-| Web | クリック | button/a/input[submit,button]/role=buttonの表示文字・aria-label・titleを横断検索(完全一致優先→部分一致) |
+| Web | クリック | button/a/input[submit,button]/role=buttonの表示文字・aria-label・titleを横断検索(完全一致優先→部分一致)。`obstruction_wait_seconds`で広告等に妨害された場合の手動close待ちに対応 |
 | Web | 入力 | placeholder/aria-label/name/id、または関連する`<label>`の文言。Enterキーでの送信も選択可 |
 | Web | ドロップダウン選択 | 上記と同じ探し方で`<select>`を特定し、選択肢の表示文字で選択 |
 | Web | 待機 | 指定秒数のスリープ |
@@ -395,6 +434,9 @@ Webサイト操作は最初にサイトを開いたときだけ選択が必要�
 | Web | 表の1列等をリストとして読み取る | `get_text_list_by_selector`。for繰り返し構文と組み合わせ可 |
 | Web | チェックボックスのON/OFF | `check_checkbox_by_text`。カスタムデザイン(隠しinput+疑似要素)にも対応 |
 | Web | ウィンドウサイズ/位置/表示倍率の指定 | `set_window_size`/`set_window_position`/`set_zoom`。pyautogui併用時の座標合わせ用 |
+| Web | 番号指定で表のセルを読み取る | `list_tables`/`get_table_cell_text`。1始まりの表番号・行番号・列番号を指定、登録前にプレビュー可 |
+| Web | 番号指定でクリック/入力/選択 | `list_clickable_elements`/`click_by_index`、`list_input_elements`/`type_by_index`、`list_dropdown_elements`/`select_by_index`。表示文字での特定が難しい場合の最終手段 |
+| Web | 番号指定でチェックボックス/トグルのON/OFF | `list_checkbox_elements`/`check_checkbox_by_index`、`list_toggle_elements`/`toggle_by_index`(role=switch/aria-pressed対応) |
 | エクスプローラー | パスを開く | 既定のファイラー(エクスプローラー)でフォルダ/ファイルを開く |
 | エクスプローラー | フォルダ作成 / 移動 / コピー(ファイル・フォルダとも) | 移動・コピー先に同名のものがあれば既定で拒否(上書きは明示指定制) |
 | エクスプローラー | 名前を変更する(ファイル・フォルダとも) | `new_name`には名前のみ指定可(パス区切り文字は拒否)。変更先が既存なら既定で拒否 |
