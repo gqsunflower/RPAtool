@@ -20,10 +20,13 @@ from typing import Callable
 
 
 class HealthChecker:
-    def __init__(self, config_dir: Path, browser_factory: Callable[[], object]):
+    def __init__(self, config_dir: Path, browser_factory: Callable[[str | None], object]):
         """
-        browser_factory: 呼び出すたびに新しい BrowserHandler を返す関数
-                          (例: lambda: BrowserHandler(whitelist_path, headless=True))
+        browser_factory: マクロに保存されたbrowser名("chrome"/"edge"、未保存ならNone)
+                          を渡すと新しい BrowserHandler を返す関数
+                          (例: lambda b: BrowserHandler(whitelist_path, headless=True,
+                          browser=b or "chrome"))。Noneの場合の既定browserの決定は
+                          呼び出し側(factory)に委ねる。
         """
         self.config_dir = Path(config_dir)
         self.macros_path = self.config_dir / "macros.json"
@@ -46,7 +49,7 @@ class HealthChecker:
 
         steps = macros[macro_name].get("steps", [])
         report: list[dict] = []
-        browser = self.browser_factory()
+        browser = self.browser_factory(macros[macro_name].get("browser"))
         opened = False
 
         try:

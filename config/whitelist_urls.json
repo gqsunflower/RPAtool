@@ -10,6 +10,9 @@
         "username_env": "PORTAL_USERNAME",
         "password_env": "PORTAL_PASSWORD"
       }
+    },
+    "tenki": {
+      "url": "https://tenki.jp/"
     }
   }
 }

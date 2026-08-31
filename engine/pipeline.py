@@ -48,16 +48,21 @@ class PipelineRunner:
         name: str,
         slot_prompt_fn: Callable[[str, str], Any],
         dry_run: bool = False,
+        before_macro: Callable[[str], None] | None = None,
         **executor_kwargs: Any,
     ) -> dict[str, list[Any]]:
         """slot_prompt_fn(macro_name, slot_name) -> 値  を呼んで、固定値が
         無いスロットをその場で確認しながら、登録順にマクロを実行する。
+        before_macro(macro_name) を渡しておくと、各マクロの実行直前に呼ばれる
+        (マクロごとに異なるブラウザ(chrome/edge)へ切り替える等に使う)。
         """
         pipeline = self.get_pipeline(name)
         results: dict[str, list[Any]] = {}
 
         for entry in pipeline.get("macros", []):
             macro_name = entry["macro"]
+            if before_macro:
+                before_macro(macro_name)
             slots: dict = dict(entry.get("slots", {}))
             for slot_name in self.executor.required_slots(macro_name):
                 if slot_name not in slots:

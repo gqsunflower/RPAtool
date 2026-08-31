@@ -35,6 +35,7 @@ sys.path.insert(0, str(BASE_DIR))
 
 from engine.recorder import MacroRecorder  # noqa: E402
 from handlers.browser_handler import (  # noqa: E402
+    BrowserHandler,
     ElementNotFoundError,
     SiteNotWhitelistedError,
 )
@@ -468,6 +469,16 @@ class RecorderApp(_AppBase):
         self.action_combo.grid(row=0, column=3, padx=4)
         self.action_combo.bind("<<ComboboxSelected>>", lambda e: self._on_action_changed())
 
+        ttk.Label(top, text="ブラウザ:").grid(row=0, column=4, sticky="w", padx=(16, 0))
+        browser_labels = {"chrome": "Chrome", "edge": "Edge"}
+        self._browser_label_to_key = {v: k for k, v in browser_labels.items()}
+        self.browser_combo = ttk.Combobox(
+            top, state="readonly", width=10, values=list(browser_labels.values()),
+        )
+        self.browser_combo.set(browser_labels.get(self.recorder.browser.browser, "Chrome"))
+        self.browser_combo.grid(row=0, column=5, padx=4)
+        self.browser_combo.bind("<<ComboboxSelected>>", lambda e: self._on_browser_changed())
+
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True)
 
@@ -565,6 +576,38 @@ class RecorderApp(_AppBase):
             ttk.Label(self.form_frame, text="(未対応)").pack()
             return
         builder(action_label)
+
+    def _on_browser_changed(self) -> None:
+        label = self.browser_combo.get()
+        new_browser = self._browser_label_to_key.get(label, "chrome")
+        if new_browser == self.recorder.browser.browser:
+            return
+
+        # 既にブラウザが起動済み(サイトを開いている等)の場合、切り替えると
+        # 今開いている画面は失われるため、先に確認する。
+        if self.recorder.browser._driver is not None:
+            if not self._confirm(
+                f"ブラウザを{label}に切り替えます。今開いているブラウザ画面は閉じられます。"
+                "よろしいですか?"
+            ):
+                # 取り消し: プルダウンの表示を元のブラウザに戻す
+                current_label = {"chrome": "Chrome", "edge": "Edge"}.get(
+                    self.recorder.browser.browser, "Chrome"
+                )
+                self.browser_combo.set(current_label)
+                return
+            try:
+                self.recorder.browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        self.recorder.browser = BrowserHandler(
+            self.recorder.config_dir / "whitelist_urls.json",
+            headless=False,
+            browser=new_browser,
+        )
+        self.recorder._site_opened = False
+        self.log(f"→ ブラウザを{label}に切り替えました")
 
     # ---------- 共通ヘルパー ----------
 
@@ -3421,6 +3464,10 @@ class RecorderApp(_AppBase):
                 "required_slots": self.recorder.required_slots,
                 "steps": self.recorder.steps,
             }
+            if any(s.get("handler") == "browser" for s in self.recorder.steps):
+                # このマクロを記録したときに使っていたブラウザ(chrome/edge)を保存し、
+                # 実行時にこのマクロだけ自動でそのブラウザに切り替わるようにする。
+                macro_def["browser"] = self.recorder.browser.browser
             self.recorder._save_macro(macro_name, macro_def)
             self.recorder._save_intent(macro_name, description, keywords)
             win.destroy()

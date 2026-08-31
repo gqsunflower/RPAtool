@@ -3440,6 +3440,12 @@ class MacroRecorder:
             "required_slots": self.required_slots,
             "steps": self.steps,
         }
+        if any(s.get("handler") == "browser" for s in self.steps):
+            # このマクロを記録したときに使っていたブラウザ(chrome/edge)をそのまま
+            # 保存しておく。実行時、このマクロだけ自動でそのブラウザに切り替わる
+            # (社内で作業によってEdge指定されている場合など、マクロごとに
+            # 使うブラウザが違っても、同じセッション内で混在して実行できる)。
+            macro_def["browser"] = self.browser.browser
         self._save_macro(macro_name, macro_def)
         self._save_intent(macro_name, description, keywords)
 

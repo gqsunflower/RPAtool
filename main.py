@@ -71,17 +71,56 @@ logging.basicConfig(
 logger = logging.getLogger("rpa_local_ai.main")
 
 
-def build_handlers(headless: bool, browser: str = "chrome") -> dict:
+class BrowserPool:
+    """マクロごとに異なるブラウザ(chrome/edge)を要求する場合に、同じセッション内で
+    両方を使い分けるための BrowserHandler キャッシュ。一度開いたブラウザは
+    セッション終了まで再利用し、都度閉じ直さない(社内の一部業務だけEdge指定、
+    といったケースで、都度ツールを再起動しなくても済むようにするため)。
+    """
+
+    def __init__(self, whitelist_path: Path, headless: bool):
+        self.whitelist_path = whitelist_path
+        self.headless = headless
+        self._handlers: dict[str, BrowserHandler] = {}
+
+    def get(self, browser: str) -> BrowserHandler:
+        if browser not in self._handlers:
+            self._handlers[browser] = BrowserHandler(
+                self.whitelist_path, headless=self.headless, browser=browser
+            )
+        return self._handlers[browser]
+
+    def close_all(self) -> None:
+        for handler in self._handlers.values():
+            try:
+                handler.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def build_handlers(headless: bool, browser_pool: BrowserPool, browser: str = "chrome") -> dict:
     return {
         "excel": ExcelHandler(),
         "pdf": PdfHandler(),
-        "browser": BrowserHandler(CONFIG_DIR / "whitelist_urls.json", headless=headless, browser=browser),
+        "browser": browser_pool.get(browser),
         "explorer": ExplorerHandler(),
         "process": ProcessHandler(CONFIG_DIR / "exec_whitelist.json"),
         "desktop": DesktopHandler(),
         "text": TextHandler(),
         "list": ListHandler(),
     }
+
+
+def apply_macro_browser(
+    executor: MacroExecutor, browser_pool: BrowserPool, macro_name: str, default_browser: str
+) -> None:
+    """マクロにbrowser指定(記録時に使っていたchrome/edge)が保存されていれば、
+    実行直前にexecutorのbrowserハンドラをそちらへ切り替える。保存されていなければ
+    セッションの既定ブラウザ(--browser)のままにする。
+    """
+    macro = executor.get_macro(macro_name)
+    browser = macro.get("browser") or default_browser
+    executor.handlers["browser"] = browser_pool.get(browser)
 
 
 def run_macro_noninteractive(
@@ -99,13 +138,17 @@ def run_macro_noninteractive(
         print(f"⚠ --slots のJSONが不正です: {e}")
         return False
 
-    executor = build_executor(headless, browser=browser)
+    browser_pool = BrowserPool(CONFIG_DIR / "whitelist_urls.json", headless)
+    executor = build_executor(headless, browser_pool, browser=browser)
+    apply_macro_browser(executor, browser_pool, macro_name, browser)
     try:
         results = executor.run(macro_name, slots, dry_run=False)
     except Exception as e:  # noqa: BLE001
         logger.exception("非対話実行でエラーが発生しました: %s", macro_name)
         print(f"⚠ マクロ '{macro_name}' の実行に失敗しました: {e}")
         return False
+    finally:
+        browser_pool.close_all()
 
     print(f"マクロ '{macro_name}' が完了しました。")
     for r in results:
@@ -113,11 +156,11 @@ def run_macro_noninteractive(
     return True
 
 
-def build_executor(headless: bool, browser: str = "chrome") -> MacroExecutor:
+def build_executor(headless: bool, browser_pool: BrowserPool, browser: str = "chrome") -> MacroExecutor:
     run_logger = RunLogger(LOG_DIR / "execution_log.csv")
     return MacroExecutor(
         CONFIG_DIR / "macros.json",
-        build_handlers(headless, browser=browser),
+        build_handlers(headless, browser_pool, browser=browser),
         run_logger=run_logger,
         screenshot_dir=SCREENSHOT_DIR,
     )
@@ -415,6 +458,10 @@ def _insert_step_interactive(
     final_steps = existing_steps[:insert_before] + new_steps + existing_steps[insert_before:]
     macro["steps"] = final_steps
     macro["required_slots"] = rec.required_slots
+    if "browser" not in macro and any(s.get("handler") == "browser" for s in new_steps):
+        # このマクロに元々Web操作が無く、今回初めて追加された場合、
+        # 今使ったブラウザ(chrome/edge)を記録しておく。
+        macro["browser"] = browser
     backup_file(macros_path, BACKUP_DIR)
     with open(macros_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -478,7 +525,11 @@ def manage_steps(config_dir: Path, browser: str = "chrome") -> None:
                 except ValueError:
                     print("  入力が正しくありません\n")
                     continue
-                _insert_step_interactive(config_dir, macro_name, pos, browser=browser)
+                # このマクロに保存済みのbrowser(chrome/edge)があればそちらを使う
+                # (Web操作の手順を挿入する際、記録時と違うブラウザで動作確認
+                # してしまうのを防ぐ)。
+                macro_browser = data["macros"][macro_name].get("browser") or browser
+                _insert_step_interactive(config_dir, macro_name, pos, browser=macro_browser)
                 continue
 
             s = input("  対象の手順番号> ").strip()
@@ -734,7 +785,13 @@ def create_pipeline(config_dir: Path, executor: MacroExecutor) -> None:
           f"({' → '.join(macro_names)})\n")
 
 
-def run_pipeline(config_dir: Path, executor: MacroExecutor, dry_run: bool) -> None:
+def run_pipeline(
+    config_dir: Path,
+    executor: MacroExecutor,
+    dry_run: bool,
+    browser_pool: BrowserPool,
+    default_browser: str = "chrome",
+) -> None:
     runner = PipelineRunner(config_dir, executor)
     names = runner.list_names()
     if not names:
@@ -757,9 +814,13 @@ def run_pipeline(config_dir: Path, executor: MacroExecutor, dry_run: bool) -> No
         print(f"  [{macro_name}]")
         return prompt_for_slot(slot_name)
 
+    def before_macro(macro_name: str) -> None:
+        apply_macro_browser(executor, browser_pool, macro_name, default_browser)
+
     try:
         results = runner.run(
-            pipeline_name, slot_prompt_fn, dry_run=dry_run, on_failure=cli_failure_prompt
+            pipeline_name, slot_prompt_fn, dry_run=dry_run,
+            before_macro=before_macro, on_failure=cli_failure_prompt,
         )
         print("\n  パイプラインの実行が完了しました:")
         for macro_name, macro_results in results.items():
@@ -796,8 +857,10 @@ def run_health_check(
     """全マクロ(またはtargetで指定した1つ)のヘルスチェックを行い、
     問題があれば標準出力に表示する。戻り値は「全てOKだったか」。
     """
-    def factory():
-        return BrowserHandler(config_dir / "whitelist_urls.json", headless=headless, browser=browser)
+    def factory(browser_choice: str | None):
+        return BrowserHandler(
+            config_dir / "whitelist_urls.json", headless=headless, browser=browser_choice or browser
+        )
 
     checker = HealthChecker(config_dir, factory)
     all_ok = True
@@ -849,7 +912,8 @@ def health_check_menu(executor: MacroExecutor, browser: str = "chrome") -> None:
 
 def run_repl(dry_run: bool, headless: bool, browser: str = "chrome") -> None:
     intent_engine = IntentEngine(CONFIG_DIR / "intents.json")
-    executor = build_executor(headless, browser=browser)
+    browser_pool = BrowserPool(CONFIG_DIR / "whitelist_urls.json", headless)
+    executor = build_executor(headless, browser_pool, browser=browser)
 
     print("=== 疑似ローカルAI (RPA特化) ===")
     print("Excel / PDF / 登録済みWebサイト / エクスプローラー / exe・py実行 / デスクトップ操作 /")
@@ -923,6 +987,7 @@ def run_repl(dry_run: bool, headless: bool, browser: str = "chrome") -> None:
             macro_name = choose_macro(executor)
             if macro_name is None:
                 continue
+            apply_macro_browser(executor, browser_pool, macro_name, browser)
             slots: dict = {}
             for slot_name in executor.required_slots(macro_name):
                 slots[slot_name] = prompt_for_slot(slot_name)
@@ -938,7 +1003,7 @@ def run_repl(dry_run: bool, headless: bool, browser: str = "chrome") -> None:
             continue
 
         if text in PIPELINE_RUN_TRIGGERS:
-            run_pipeline(CONFIG_DIR, executor, dry_run)
+            run_pipeline(CONFIG_DIR, executor, dry_run, browser_pool=browser_pool, default_browser=browser)
             continue
 
         if text in HEALTHCHECK_TRIGGERS:
@@ -960,6 +1025,7 @@ def run_repl(dry_run: bool, headless: bool, browser: str = "chrome") -> None:
 
         print(f"  → 意図: {match.intent_id} (score={match.score}) / マクロ: {match.macro}")
 
+        apply_macro_browser(executor, browser_pool, match.macro, browser)
         slots = {}
         for slot_name in executor.required_slots(match.macro):
             slots[slot_name] = prompt_for_slot(slot_name)
@@ -973,11 +1039,14 @@ def run_repl(dry_run: bool, headless: bool, browser: str = "chrome") -> None:
             print(f"\n手順 {e.step_number} を修正します。")
             open_step_editor(CONFIG_DIR, match.macro, e.step_number)
             print("修正のため、プログラムを終了します。")
+            browser_pool.close_all()
             return
         except Exception as e:  # noqa: BLE001
             logger.exception("マクロ実行中にエラーが発生しました")
             print(f"  ⚠ エラー: {e}")
         print()
+
+    browser_pool.close_all()
 
 
 def main() -> None:
