@@ -1,5 +1,8 @@
 """
 BrowserHandler: Selenium を使ったブラウザ操作ハンドラ。
+既定はChromeだが、コンストラクタの browser="edge" でMicrosoft Edge
+(Chromiumベース)にも対応する。両者ともselenium 1パッケージで動くため
+追加のpipインストールは不要(Edge本体のインストールは別途必要)。
 
 安全上の制約(重要):
 - config/whitelist_urls.json に登録された site_key の URL にしか
@@ -64,10 +67,25 @@ def _xpath_literal(text: str) -> str:
     return "concat(" + ", \"'\", ".join(f"'{p}'" for p in parts) + ")"
 
 
+_SUPPORTED_BROWSERS = ("chrome", "edge")
+
+
 class BrowserHandler:
-    def __init__(self, whitelist_path: Path, headless: bool = True):
+    def __init__(self, whitelist_path: Path, headless: bool = True, browser: str = "chrome"):
+        """browser: "chrome"(既定)または"edge"。EdgeはChromiumベースのため、
+        表示テキストでのクリック・CSSセレクタ・JavaScript実行・画面のPDF保存
+        (DevTools Protocol)等、ここで使っている機能はすべて同様に動作する。
+        追加のpipパッケージは不要(seleniumが両対応)だが、Edge本体のインストール
+        は別途必要(ドライバ(msedgedriver)はSelenium Managerが自動取得する)。
+        """
+        browser = browser.lower()
+        if browser not in _SUPPORTED_BROWSERS:
+            raise ValueError(
+                f"未対応のbrowserです: {browser}(使えるもの: {', '.join(_SUPPORTED_BROWSERS)})"
+            )
         self.whitelist_path = Path(whitelist_path)
         self.headless = headless
+        self.browser = browser
         self._driver = None
         self._sites = self._load_whitelist()
         self._current_site_key: str | None = None
@@ -106,14 +124,25 @@ class BrowserHandler:
     def _get_driver(self):
         if self._driver is None:
             from selenium import webdriver
-            from selenium.webdriver.chrome.options import Options
 
-            options = Options()
-            if self.headless:
-                options.add_argument("--headless=new")
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            self._driver = webdriver.Chrome(options=options)
+            if self.browser == "edge":
+                from selenium.webdriver.edge.options import Options as EdgeOptions
+
+                options = EdgeOptions()
+                if self.headless:
+                    options.add_argument("--headless=new")
+                options.add_argument("--no-sandbox")
+                options.add_argument("--disable-dev-shm-usage")
+                self._driver = webdriver.Edge(options=options)
+            else:
+                from selenium.webdriver.chrome.options import Options as ChromeOptions
+
+                options = ChromeOptions()
+                if self.headless:
+                    options.add_argument("--headless=new")
+                options.add_argument("--no-sandbox")
+                options.add_argument("--disable-dev-shm-usage")
+                self._driver = webdriver.Chrome(options=options)
         return self._driver
 
     def _assert_domain_allowed(self, url: str, expected_url: str) -> None:

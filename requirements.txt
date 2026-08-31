@@ -3,6 +3,10 @@ pdfplumber>=0.11
 pypdf>=4.0
 selenium>=4.20
 
+# Web操作は既定でChromeを使いますが、main.py/gui_recorder.pyに --browser edge を
+# 付けるとMicrosoft Edge(Chromiumベース)でも動作します。追加のpipパッケージは
+# 不要(seleniumが両対応)ですが、Edge本体のインストールは別途必要です。
+
 # 以下は任意機能向けの追加依存です。使わない機能があればインストール不要です。
 
 # Excelの「PDFとして保存」「.xlsm内マクロの実行」に必要。

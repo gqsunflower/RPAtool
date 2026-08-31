@@ -71,11 +71,11 @@ logging.basicConfig(
 logger = logging.getLogger("rpa_local_ai.main")
 
 
-def build_handlers(headless: bool) -> dict:
+def build_handlers(headless: bool, browser: str = "chrome") -> dict:
     return {
         "excel": ExcelHandler(),
         "pdf": PdfHandler(),
-        "browser": BrowserHandler(CONFIG_DIR / "whitelist_urls.json", headless=headless),
+        "browser": BrowserHandler(CONFIG_DIR / "whitelist_urls.json", headless=headless, browser=browser),
         "explorer": ExplorerHandler(),
         "process": ProcessHandler(CONFIG_DIR / "exec_whitelist.json"),
         "desktop": DesktopHandler(),
@@ -84,7 +84,9 @@ def build_handlers(headless: bool) -> dict:
     }
 
 
-def run_macro_noninteractive(macro_name: str, slots_json: str | None, headless: bool) -> bool:
+def run_macro_noninteractive(
+    macro_name: str, slots_json: str | None, headless: bool, browser: str = "chrome"
+) -> bool:
     """--run-macro 用: 対話なしで1つのマクロを実行して終了する。
     Power Automate Desktop等の外部ツールから、このRPAツールを1コマンドで
     呼び出すための入口。失敗時は3択メニューを出さず、そのまま失敗として
@@ -97,7 +99,7 @@ def run_macro_noninteractive(macro_name: str, slots_json: str | None, headless: 
         print(f"⚠ --slots のJSONが不正です: {e}")
         return False
 
-    executor = build_executor(headless)
+    executor = build_executor(headless, browser=browser)
     try:
         results = executor.run(macro_name, slots, dry_run=False)
     except Exception as e:  # noqa: BLE001
@@ -111,11 +113,11 @@ def run_macro_noninteractive(macro_name: str, slots_json: str | None, headless: 
     return True
 
 
-def build_executor(headless: bool) -> MacroExecutor:
+def build_executor(headless: bool, browser: str = "chrome") -> MacroExecutor:
     run_logger = RunLogger(LOG_DIR / "execution_log.csv")
     return MacroExecutor(
         CONFIG_DIR / "macros.json",
-        build_handlers(headless),
+        build_handlers(headless, browser=browser),
         run_logger=run_logger,
         screenshot_dir=SCREENSHOT_DIR,
     )
@@ -330,7 +332,9 @@ def _print_control_flow_warnings(steps: list[dict]) -> None:
         print(f"  ⚠ 制御構文の整合性チェック: {w}")
 
 
-def _insert_step_interactive(config_dir: Path, macro_name: str, insert_before: int) -> bool:
+def _insert_step_interactive(
+    config_dir: Path, macro_name: str, insert_before: int, browser: str = "chrome"
+) -> bool:
     """既存マクロの指定位置(0始まり)の直前に、新しい手順を1つ以上
     対話形式で挿入する。内部的にはMacroRecorderの各領域メニューを
     そのまま再利用し、追加された手順だけを本来の位置へ差し込む。
@@ -343,7 +347,7 @@ def _insert_step_interactive(config_dir: Path, macro_name: str, insert_before: i
     macro = data["macros"][macro_name]
     existing_steps = macro["steps"]
 
-    rec = MacroRecorder(config_dir)
+    rec = MacroRecorder(config_dir, browser=browser)
     rec.steps = list(existing_steps)  # 既存の手順をそのまま引き継ぐ(末尾に追加される)
     rec.required_slots = list(macro.get("required_slots", []))
 
@@ -419,7 +423,7 @@ def _insert_step_interactive(config_dir: Path, macro_name: str, insert_before: i
     return True
 
 
-def manage_steps(config_dir: Path) -> None:
+def manage_steps(config_dir: Path, browser: str = "chrome") -> None:
     """登録済みマクロの手順を、後から並び替え・削除・挿入するためのメニュー。"""
     macros_path = config_dir / "macros.json"
 
@@ -474,7 +478,7 @@ def manage_steps(config_dir: Path) -> None:
                 except ValueError:
                     print("  入力が正しくありません\n")
                     continue
-                _insert_step_interactive(config_dir, macro_name, pos)
+                _insert_step_interactive(config_dir, macro_name, pos, browser=browser)
                 continue
 
             s = input("  対象の手順番号> ").strip()
@@ -652,7 +656,7 @@ def run_macro_stepwise(executor: MacroExecutor, macro_name: str, slots: dict) ->
         print(f"  ⚠ エラー: {e}")
 
 
-def launch_gui_recorder() -> None:
+def launch_gui_recorder(browser: str = "chrome") -> None:
     """gui_recorder.py を別プロセスとして起動し、終了まで待つ。
     別プロセスにするのは、TkinterのGUIイベントループとこのCLIの入力待ちを
     同じプロセス内で共存させないため(お互いをブロックしてしまう)。
@@ -666,7 +670,7 @@ def launch_gui_recorder() -> None:
 
     print("  GUIレコーダーを起動します(ウィンドウを閉じるとここに戻ります)...")
     try:
-        subprocess.run([sys.executable, str(gui_path)])
+        subprocess.run([sys.executable, str(gui_path), "--browser", browser])
     except Exception as e:  # noqa: BLE001
         print(f"  ⚠ GUIレコーダーの起動に失敗しました: {e}")
     print("  → GUIレコーダーを終了しました。\n")
@@ -786,12 +790,14 @@ def _print_health_report(macro_name: str, report: list[dict]) -> None:
         print(f"  {mark} {entry['action']} {entry['params']}{detail}")
 
 
-def run_health_check(config_dir: Path, headless: bool = True, target: str | None = None) -> bool:
+def run_health_check(
+    config_dir: Path, headless: bool = True, target: str | None = None, browser: str = "chrome"
+) -> bool:
     """全マクロ(またはtargetで指定した1つ)のヘルスチェックを行い、
     問題があれば標準出力に表示する。戻り値は「全てOKだったか」。
     """
     def factory():
-        return BrowserHandler(config_dir / "whitelist_urls.json", headless=headless)
+        return BrowserHandler(config_dir / "whitelist_urls.json", headless=headless, browser=browser)
 
     checker = HealthChecker(config_dir, factory)
     all_ok = True
@@ -818,7 +824,7 @@ def run_health_check(config_dir: Path, headless: bool = True, target: str | None
     return all_ok
 
 
-def health_check_menu(executor: MacroExecutor) -> None:
+def health_check_menu(executor: MacroExecutor, browser: str = "chrome") -> None:
     names = list(executor.macros.keys())
     if not names:
         print("  登録済みマクロがありません。\n")
@@ -829,21 +835,21 @@ def health_check_menu(executor: MacroExecutor) -> None:
         print(f"  {i}. {name}")
     choice = input("番号> ").strip()
     if choice == "0":
-        run_health_check(CONFIG_DIR, headless=True, target=None)
+        run_health_check(CONFIG_DIR, headless=True, target=None, browser=browser)
         return
     try:
         macro_name = names[int(choice) - 1]
     except (ValueError, IndexError):
         print("  入力が正しくありません\n")
         return
-    run_health_check(CONFIG_DIR, headless=True, target=macro_name)
+    run_health_check(CONFIG_DIR, headless=True, target=macro_name, browser=browser)
 
 
 # ---------- メインREPL ----------
 
-def run_repl(dry_run: bool, headless: bool) -> None:
+def run_repl(dry_run: bool, headless: bool, browser: str = "chrome") -> None:
     intent_engine = IntentEngine(CONFIG_DIR / "intents.json")
-    executor = build_executor(headless)
+    executor = build_executor(headless, browser=browser)
 
     print("=== 疑似ローカルAI (RPA特化) ===")
     print("Excel / PDF / 登録済みWebサイト / エクスプローラー / exe・py実行 / デスクトップ操作 /")
@@ -883,7 +889,7 @@ def run_repl(dry_run: bool, headless: bool) -> None:
             break
 
         if text in RECORD_TRIGGERS:
-            recorder = MacroRecorder(CONFIG_DIR)
+            recorder = MacroRecorder(CONFIG_DIR, browser=browser)
             recorder.record()
             # 新しく登録されたマクロ/意図をすぐ使えるように再読込
             intent_engine.reload()
@@ -891,7 +897,7 @@ def run_repl(dry_run: bool, headless: bool) -> None:
             continue
 
         if text in GUI_RECORD_TRIGGERS:
-            launch_gui_recorder()
+            launch_gui_recorder(browser=browser)
             # GUI側で保存された可能性があるので再読込
             intent_engine.reload()
             executor.reload()
@@ -908,7 +914,7 @@ def run_repl(dry_run: bool, headless: bool) -> None:
             continue
 
         if text in STEPS_EDIT_TRIGGERS:
-            manage_steps(CONFIG_DIR)
+            manage_steps(CONFIG_DIR, browser=browser)
             intent_engine.reload()
             executor.reload()
             continue
@@ -936,7 +942,7 @@ def run_repl(dry_run: bool, headless: bool) -> None:
             continue
 
         if text in HEALTHCHECK_TRIGGERS:
-            health_check_menu(executor)
+            health_check_menu(executor, browser=browser)
             continue
 
         match = intent_engine.classify(text)
@@ -979,6 +985,11 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="実際には実行せず手順のみ表示")
     parser.add_argument("--no-headless", action="store_true", help="ブラウザをheadlessにしない(画面表示)")
     parser.add_argument(
+        "--browser", choices=["chrome", "edge"], default="chrome",
+        help="Web操作に使うブラウザ(既定: chrome)。EdgeはChromiumベースのためほぼ同様に動作するが、"
+             "Edge本体のインストールが別途必要",
+    )
+    parser.add_argument(
         "--healthcheck-all", action="store_true",
         help="全マクロのヘルスチェックだけを行って終了する(タスクスケジューラ/cronでの定期実行向け)",
     )
@@ -995,14 +1006,16 @@ def main() -> None:
     LOG_DIR.mkdir(exist_ok=True)
 
     if args.healthcheck_all:
-        all_ok = run_health_check(CONFIG_DIR, headless=not args.no_headless)
+        all_ok = run_health_check(CONFIG_DIR, headless=not args.no_headless, browser=args.browser)
         sys.exit(0 if all_ok else 1)
 
     if args.run_macro:
-        ok = run_macro_noninteractive(args.run_macro, args.slots, headless=not args.no_headless)
+        ok = run_macro_noninteractive(
+            args.run_macro, args.slots, headless=not args.no_headless, browser=args.browser
+        )
         sys.exit(0 if ok else 1)
 
-    run_repl(dry_run=args.dry_run, headless=not args.no_headless)
+    run_repl(dry_run=args.dry_run, headless=not args.no_headless, browser=args.browser)
 
 
 if __name__ == "__main__":

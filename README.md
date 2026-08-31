@@ -49,7 +49,10 @@
   1つのCSVにまとめます。罫線の無い表は検出できないことがあります)、**埋め込み画像の抽出**
   (`extract_images`。写真・署名画像等をファイルとして書き出す。追加の依存関係は不要)にも
   対応しています。
-- **Webブラウザ** (`selenium`): ネットには接続しますが、**検索や自由なURL遷移は一切行いません**。
+- **Webブラウザ** (`selenium`): 既定では**Chrome**を操作しますが、`main.py`/`gui_recorder.py`に
+  `--browser edge`を付けると**Microsoft Edge**(Chromiumベース)でも動作します。追加のpip
+  パッケージは不要(seleniumが両対応)ですが、Edge本体のインストールは別途必要です。
+  ネットには接続しますが、**検索や自由なURL遷移は一切行いません**。
   `config/whitelist_urls.json` に登録したサイトを開く/ログインする/登録済みの操作(クリック・入力・
   選択・待機・画面のPDF保存)を行う、という登録済み操作しか実行できない設計です。
   ボタン等はCSSセレクタやclass名でガチガチに指定せず、**画面に表示されているであろう文字**を
@@ -788,6 +791,14 @@ python main.py
 
 ```bash
 python main.py --dry-run
+```
+
+`--browser edge` を付けると、Web操作にChromeの代わりにMicrosoft Edgeを使います
+(既定はchrome)。GUI版レコーダーでも同様に指定できます。
+
+```bash
+python main.py --browser edge
+python gui_recorder.py --browser edge
 ```
 
 ## 外部ツールから1コマンドで実行する(Power Automate Desktop等との連携)

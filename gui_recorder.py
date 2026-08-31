@@ -422,12 +422,12 @@ _AppBase = TkinterDnD.Tk if DND_AVAILABLE else tk.Tk
 
 
 class RecorderApp(_AppBase):
-    def __init__(self):
+    def __init__(self, browser: str = "chrome"):
         super().__init__()
         self.title("疑似ローカルAI — 操作の登録 (GUI)")
         self.geometry("1140x760")
 
-        self.recorder = MacroRecorder(CONFIG_DIR)
+        self.recorder = MacroRecorder(CONFIG_DIR, browser=browser)
         self.base_step_count = 0
 
         self._build_layout()
@@ -3444,8 +3444,18 @@ class RecorderApp(_AppBase):
 
 
 def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="疑似ローカルAI 操作の登録(GUI)")
+    parser.add_argument(
+        "--browser", choices=["chrome", "edge"], default="chrome",
+        help="Web操作に使うブラウザ(既定: chrome)。EdgeはChromiumベースのためほぼ同様に動作するが、"
+             "Edge本体のインストールが別途必要",
+    )
+    args = parser.parse_args()
+
     CLIP_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-    app = RecorderApp()
+    app = RecorderApp(browser=args.browser)
     app.mainloop()
 
 

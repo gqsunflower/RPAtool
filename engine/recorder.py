@@ -69,9 +69,9 @@ class _ActionCancelled(Exception):
 
 
 class MacroRecorder:
-    def __init__(self, config_dir: Path):
+    def __init__(self, config_dir: Path, browser: str = "chrome"):
         self.config_dir = Path(config_dir)
-        self.browser = BrowserHandler(self.config_dir / "whitelist_urls.json", headless=False)
+        self.browser = BrowserHandler(self.config_dir / "whitelist_urls.json", headless=False, browser=browser)
         self.excel = ExcelHandler()
         self.pdf = PdfHandler()
         self.explorer = ExplorerHandler()
