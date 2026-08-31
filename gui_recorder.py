@@ -469,15 +469,19 @@ class RecorderApp(_AppBase):
         self.action_combo.grid(row=0, column=3, padx=4)
         self.action_combo.bind("<<ComboboxSelected>>", lambda e: self._on_action_changed())
 
-        ttk.Label(top, text="ブラウザ:").grid(row=0, column=4, sticky="w", padx=(16, 0))
+        # ブラウザ選択はWeb領域を選んでいるときだけ表示する(Excel等では無関係なため)
+        self.browser_label = ttk.Label(top, text="ブラウザ:")
         browser_labels = {"chrome": "Chrome", "edge": "Edge"}
         self._browser_label_to_key = {v: k for k, v in browser_labels.items()}
         self.browser_combo = ttk.Combobox(
             top, state="readonly", width=10, values=list(browser_labels.values()),
         )
         self.browser_combo.set(browser_labels.get(self.recorder.browser.browser, "Chrome"))
-        self.browser_combo.grid(row=0, column=5, padx=4)
         self.browser_combo.bind("<<ComboboxSelected>>", lambda e: self._on_browser_changed())
+        self._browser_widget_grid_args = (
+            (self.browser_label, {"row": 0, "column": 4, "sticky": "w", "padx": (16, 0)}),
+            (self.browser_combo, {"row": 0, "column": 5, "padx": 4}),
+        )
 
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True)
@@ -564,6 +568,11 @@ class RecorderApp(_AppBase):
         self.current_domain = domain_key
         self.action_combo["values"] = DOMAIN_ACTIONS[domain_key]
         self.action_combo.current(0)
+        for widget, grid_args in self._browser_widget_grid_args:
+            if domain_key == "web":
+                widget.grid(**grid_args)
+            else:
+                widget.grid_remove()
         self._on_action_changed()
 
     def _on_action_changed(self) -> None:

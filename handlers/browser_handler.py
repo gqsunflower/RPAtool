@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -68,6 +69,47 @@ def _xpath_literal(text: str) -> str:
 
 
 _SUPPORTED_BROWSERS = ("chrome", "edge")
+
+# ドライバ起動失敗時のエラーメッセージから「対応バージョン」と「実際のブラウザバージョン」を
+# 拾うための正規表現。Chrome/Edge両方のSessionNotCreatedExceptionメッセージが
+# 概ねこの形式("This version of XxxDriver only supports Yyy version N" +
+# "Current browser version is M...")のため、共通で使える。
+_VERSION_MISMATCH_RE = re.compile(
+    r"only supports .*? version (\d+).*?Current browser version is ([\d.]+)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _build_launch_error(browser_label: str, driver_name: str, env_var: str, exc: Exception) -> RuntimeError:
+    """ブラウザ起動失敗時に、原因ごとに具体的な対処方法を含んだエラーにして返す。"""
+    from selenium.common.exceptions import SessionNotCreatedException
+
+    msg = str(exc)
+    if isinstance(exc, SessionNotCreatedException):
+        match = _VERSION_MISMATCH_RE.search(msg)
+        if match:
+            driver_supports, browser_version = match.group(1), match.group(2)
+            return RuntimeError(
+                f"{browser_label}のバージョンと{driver_name}のバージョンが合っていません"
+                f"({driver_name}が対応しているのは{browser_label} {driver_supports}系ですが、"
+                f"実際にインストールされている{browser_label}は{browser_version}です)。"
+                f"{browser_label}のバージョンに合った{driver_name}を再ダウンロードし、"
+                f"環境変数 {env_var} を新しいファイルのパスに更新してください"
+                f"({browser_label}は自動更新されることが多いため、{driver_name}を手動で指定している場合は"
+                f"ブラウザが更新されるたびにこのズレが起きやすくなります): {msg}"
+            )
+        return RuntimeError(
+            f"{browser_label}のバージョンと{driver_name}のバージョンが合っていない可能性があります。"
+            f"{browser_label}のバージョンに合った{driver_name}を再ダウンロードし、"
+            f"環境変数 {env_var} を新しいファイルのパスに更新してください: {msg}"
+        )
+    return RuntimeError(
+        f"{browser_label}の起動に失敗しました。Seleniumが{driver_name}を自動取得できなかった"
+        f"可能性があります(社内ネットワークが配布サーバーをブロックしている場合によく起きます)。"
+        f"{driver_name}を手動でダウンロードし、環境変数 {env_var} にそのファイルのフルパスを"
+        f"設定してから再実行してください"
+        f"(詳細はREADMEの「ブラウザのドライバを手動で用意する」を参照): {msg}"
+    )
 
 
 class BrowserHandler:
@@ -139,14 +181,7 @@ class BrowserHandler:
                 try:
                     self._driver = webdriver.Edge(options=options, service=service)
                 except Exception as e:  # noqa: BLE001
-                    raise RuntimeError(
-                        "Edgeの起動に失敗しました。SeleniumがEdge用のドライバ(msedgedriver)を"
-                        "自動取得できなかった可能性があります"
-                        "(社内ネットワークがMicrosoftの配布サーバーをブロックしている場合によく起きます)。"
-                        "msedgedriverを手動でダウンロードし、環境変数 RPA_EDGE_DRIVER_PATH に"
-                        "そのファイルのフルパスを設定してから再実行してください"
-                        "(詳細はREADMEの「ブラウザのドライバを手動で用意する」を参照): " + str(e)
-                    ) from e
+                    raise _build_launch_error("Edge", "msedgedriver", "RPA_EDGE_DRIVER_PATH", e) from e
             else:
                 from selenium.webdriver.chrome.options import Options as ChromeOptions
                 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -161,14 +196,7 @@ class BrowserHandler:
                 try:
                     self._driver = webdriver.Chrome(options=options, service=service)
                 except Exception as e:  # noqa: BLE001
-                    raise RuntimeError(
-                        "Chromeの起動に失敗しました。Seleniumがドライバ(chromedriver)を"
-                        "自動取得できなかった可能性があります"
-                        "(社内ネットワークがGoogleの配布サーバーをブロックしている場合によく起きます)。"
-                        "chromedriverを手動でダウンロードし、環境変数 RPA_CHROME_DRIVER_PATH に"
-                        "そのファイルのフルパスを設定してから再実行してください"
-                        "(詳細はREADMEの「ブラウザのドライバを手動で用意する」を参照): " + str(e)
-                    ) from e
+                    raise _build_launch_error("Chrome", "chromedriver", "RPA_CHROME_DRIVER_PATH", e) from e
         return self._driver
 
     def _assert_domain_allowed(self, url: str, expected_url: str) -> None:
