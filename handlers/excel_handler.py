@@ -37,7 +37,7 @@ from copy import copy as _copy_style
 from pathlib import Path
 from typing import Any
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.utils import column_index_from_string, get_column_letter
 
 logger = logging.getLogger("rpa_local_ai.excel")
@@ -70,6 +70,19 @@ class ExcelHandler:
 
     def list_open_workbooks(self) -> list[str]:
         return list(self._workbooks.keys())
+
+    def create_workbook(self, alias: str | None = None) -> str:
+        """新しい空のExcelブックをメモリ上に作成し、アクティブにする。
+        まだファイルとして保存されていないため、保存する際は先に
+        save_workbook_as で保存先パスを指定すること
+        (未保存の状態で save_workbook(上書き保存)を呼ぶとエラーになる)。
+        """
+        wb = Workbook()
+        used_alias = alias or f"新規ブック{len(self._workbooks) + 1}"
+        self._workbooks[used_alias] = {"wb": wb, "path": None, "last_records": []}
+        self._active_alias = used_alias
+        logger.info("新しいExcelブックを作成しました(alias=%s)", used_alias)
+        return f"created: alias={used_alias}"
 
     def load_workbook(self, path: str, alias: str | None = None) -> str:
         """Excelファイルを開いてメモリ上に保持し、アクティブにする。
@@ -474,8 +487,25 @@ class ExcelHandler:
         # .xlsm/.xltmとして保存する場合、load_workbook時にkeep_vba=Trueで
         # 読み込んでいれば、既存のVBAはそのまま保持される
         entry["wb"].save(out)
+        entry["path"] = out  # 以後 save_workbook(上書き保存)はこのパスに対して行う
         logger.info("Excelを保存しました: %s", out)
         return str(out)
+
+    def save_workbook(self) -> str:
+        """アクティブなブックを、読み込んだとき(または前回save_workbook_asで
+        指定したとき)と同じパスへ、名前を変えずに上書き保存する。
+        新規作成したブック(create_workbook)でまだ一度も保存先が決まっていない
+        場合はエラーになるため、先に save_workbook_as で保存先パスを指定すること。
+        """
+        entry = self._active()
+        if entry["path"] is None:
+            raise RuntimeError(
+                "このブックはまだ一度も保存先が指定されていません(新規作成したブック等)。"
+                "先に save_workbook_as で保存先パスを指定してください。"
+            )
+        entry["wb"].save(entry["path"])
+        logger.info("Excelを上書き保存しました: %s", entry["path"])
+        return str(entry["path"])
 
     def save_as_pdf(self, path: str, output_path: str, sheet_name: str | None = None) -> str:
         """あらかじめファイル側で設定済みの印刷範囲・ページ設定のままPDFへ

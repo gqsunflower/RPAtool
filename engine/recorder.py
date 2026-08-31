@@ -418,6 +418,8 @@ class MacroRecorder:
             print("  22) セル範囲の値を空にする")
             print("  23) シートを削除する")
             print("  24) 最終列を取得する")
+            print("  25) 新規ブックを立ち上げる")
+            print("  26) 名前を変えずに上書き保存する")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -470,10 +472,39 @@ class MacroRecorder:
                 self._record_excel_delete_sheet()
             elif choice == "24":
                 self._record_excel_get_last_column()
+            elif choice == "25":
+                self._record_excel_create()
+            elif choice == "26":
+                self._record_excel_save()
             elif choice == "0":
                 return
             else:
-                print("0〜24のいずれかを入力してください。\n")
+                print("0〜26のいずれかを入力してください。\n")
+
+    def _record_excel_create(self) -> None:
+        alias = self._ask(
+            "  この新規ブックを後で識別するための名前(複数ブックを扱う場合に使用。"
+            "空欄なら自動で付けます): "
+        ).strip()
+        try:
+            result_msg = self.excel.create_workbook(alias or None)
+            print(f"  → 実際に新しいブックを作成できました。({result_msg})")
+            params = {}
+            if alias:
+                params["alias"] = alias
+            self.steps.append({"handler": "excel", "action": "create_workbook", "params": params})
+            print("  → 登録しました。\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+
+    def _record_excel_save(self) -> None:
+        try:
+            result_msg = self.excel.save_workbook()
+            print(f"  → 実際に上書き保存できました: {result_msg}")
+            self.steps.append({"handler": "excel", "action": "save_workbook", "params": {}})
+            print("  → 登録しました。\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
 
     def _record_excel_load(self) -> None:
         result = self._ask_sluttable_value("開くExcelファイルのパス")

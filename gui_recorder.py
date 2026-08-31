@@ -66,8 +66,8 @@ DOMAIN_LABELS = {
 
 DOMAIN_ACTIONS = {
     "excel": [
-        "ファイルを開く", "シートを読み込む", "CSVへ書き出す", "セルに書き込む",
-        "別名で保存する", "PDFとして保存する", "VBAマクロを実行する",
+        "ファイルを開く", "新規ブックを立ち上げる", "シートを読み込む", "CSVへ書き出す", "セルに書き込む",
+        "別名で保存する", "名前を変えずに上書き保存する", "PDFとして保存する", "VBAマクロを実行する",
         "開いている別のExcelに切り替える", "セル1つの値を読み込む", "最終行を取得する",
         "セルをコピーして貼り付ける", "シートをコピーする", "シート名の一覧を取得する",
         "印刷範囲を指定する", "新規シートを追加する", "シート名を変更する",
@@ -723,6 +723,24 @@ class RecorderApp(_AppBase):
 
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
+        elif action == "新規ブックを立ち上げる":
+            alias_field = PlainField(f, "識別名(複数ブックを扱う場合。空欄なら自動)")
+            alias_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                alias = alias_field.get().strip()
+                try:
+                    result_msg = self.recorder.excel.create_workbook(alias or None)
+                    self.log(f"→ 新しいブックを作成しました({result_msg})")
+                    params = {}
+                    if alias:
+                        params["alias"] = alias
+                    self.register_step({"handler": "excel", "action": "create_workbook", "params": params})
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
         elif action == "シートを読み込む":
             field = ValueSlotField(f, "読み込むシート名")
             field.pack(fill="x", pady=4)
@@ -905,6 +923,23 @@ class RecorderApp(_AppBase):
                     self.recorder.excel.save_workbook_as(test_v)
                     self.log(f"→ 保存できました: {test_v}")
                     self.register_step(step)
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "名前を変えずに上書き保存する":
+            ttk.Label(
+                f, text="今アクティブなブックを、読み込んだとき(または前回「別名で保存する」で"
+                        "指定したとき)と同じパスに、名前を変えずに上書き保存します。",
+                foreground="#557", justify="left",
+            ).pack(anchor="w", pady=(0, 6))
+
+            def on_submit():
+                try:
+                    result_msg = self.recorder.excel.save_workbook()
+                    self.log(f"→ 上書き保存できました: {result_msg}")
+                    self.register_step({"handler": "excel", "action": "save_workbook", "params": {}})
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
 
@@ -2424,6 +2459,31 @@ class RecorderApp(_AppBase):
             row_field.pack(fill="x", pady=2)
             col_field = PlainField(extra_frame, "何列目を読み取りますか?(1始まり)", width=10)
             col_field.pack(fill="x", pady=2)
+
+            preview_var = tk.StringVar(value="(一覧から表を選び、行・列を入力すると、ここに実際の値が表示されます)")
+            ttk.Label(
+                extra_frame, textvariable=preview_var, foreground="#25a", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(6, 2))
+
+            def update_preview(*_args) -> None:
+                sel = listbox.curselection()
+                if not sel or not items:
+                    preview_var.set("(一覧から表を選んでください)")
+                    return
+                idx = items[sel[0]]["index"]
+                row_raw, col_raw = row_field.get().strip(), col_field.get().strip()
+                if not row_raw.isdigit() or not col_raw.isdigit():
+                    preview_var.set("(行・列を数字で入力してください)")
+                    return
+                try:
+                    value = self.recorder.browser.get_table_cell_text(idx, int(row_raw), int(col_raw))
+                    preview_var.set(f"プレビュー(実際に取得できた文字): {value!r}")
+                except Exception as e:  # noqa: BLE001
+                    preview_var.set(f"⚠ 取得できませんでした: {e}")
+
+            listbox.bind("<<ListboxSelect>>", update_preview, add="+")
+            row_field.var.trace_add("write", update_preview)
+            col_field.var.trace_add("write", update_preview)
 
             def on_submit():
                 idx = selected_index()

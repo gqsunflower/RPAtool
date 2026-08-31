@@ -97,6 +97,18 @@ class BrowserPool:
             except Exception:  # noqa: BLE001
                 pass
 
+    def set_headless(self, headless: bool) -> bool:
+        """headless設定(バックグラウンド実行 or 画面を表示して実行)を切り替える。
+        既に開いているブラウザがあれば一旦すべて閉じ、次に使用するときに
+        新しい設定で開き直す。戻り値: 実際に設定が変わったか。
+        """
+        if headless == self.headless:
+            return False
+        self.close_all()
+        self._handlers.clear()
+        self.headless = headless
+        return True
+
 
 def build_handlers(headless: bool, browser_pool: BrowserPool, browser: str = "chrome") -> dict:
     return {
@@ -908,6 +920,33 @@ def health_check_menu(executor: MacroExecutor, browser: str = "chrome") -> None:
     run_health_check(CONFIG_DIR, headless=True, target=macro_name, browser=browser)
 
 
+def manage_execution_mode(browser_pool: BrowserPool) -> None:
+    """マクロ実行時にブラウザの画面を表示するか(バックグラウンド実行/
+    ソフトウェアを起動して目で見て確認しながら実行)を対話的に切り替える。
+    切り替えると、既に開いていたブラウザは一旦閉じ、次にマクロを実行する
+    ときから新しい設定で開き直される(ステップ実行・パイプライン実行にも
+    共通して反映される)。
+    """
+    current = "バックグラウンド(画面を表示しない)" if browser_pool.headless else "ソフトウェアを起動して実行(画面を表示する)"
+    print(f"今の設定: {current}")
+    print("  1) バックグラウンドで実行する(画面を表示しない。既定。他の作業の邪魔にならない)")
+    print("  2) ソフトウェアを起動して実行する(ブラウザ等の画面を表示し、目で見て動作が正しいか確認できる)")
+    print("  0) 変更しない")
+    choice = input("番号> ").strip()
+    if choice == "1":
+        changed = browser_pool.set_headless(True)
+    elif choice == "2":
+        changed = browser_pool.set_headless(False)
+    else:
+        print("  → 変更しませんでした。\n")
+        return
+    if changed:
+        print("  → 設定を変更しました(次にマクロを実行するときから反映されます。"
+              "既に開いていたブラウザは閉じました)。\n")
+    else:
+        print("  → 既にその設定でした(変更なし)。\n")
+
+
 # ---------- メインREPL ----------
 
 def run_repl(dry_run: bool, headless: bool, browser: str = "chrome") -> None:
@@ -927,6 +966,8 @@ def run_repl(dry_run: bool, headless: bool, browser: str = "chrome") -> None:
     print("実行記録をExcelで見たいときは '実行ログ出力' と入力してください。")
     print("複数マクロをまとめて実行したいときは 'パイプライン作成' / 'パイプライン実行' と入力してください。")
     print("登録済みボタン等が今も見つかるか確認したいときは 'ヘルスチェック' と入力してください。")
+    print("マクロ実行時にブラウザ等の画面を表示するか(バックグラウンド/目で見て確認)を"
+          "切り替えたいときは '実行方法設定' と入力してください。")
     print("終了するには 'exit' または 'quit' を入力してください。\n")
 
     RECORD_TRIGGERS = ("操作を登録", "マクロ登録", "レコーダー", "record")
@@ -939,6 +980,7 @@ def run_repl(dry_run: bool, headless: bool, browser: str = "chrome") -> None:
     PIPELINE_CREATE_TRIGGERS = ("パイプライン作成", "パイプライン登録")
     PIPELINE_RUN_TRIGGERS = ("パイプライン実行",)
     HEALTHCHECK_TRIGGERS = ("ヘルスチェック", "健全性チェック")
+    EXEC_MODE_TRIGGERS = ("実行方法設定", "実行モード設定", "画面表示設定")
 
     while True:
         try:
@@ -1008,6 +1050,10 @@ def run_repl(dry_run: bool, headless: bool, browser: str = "chrome") -> None:
 
         if text in HEALTHCHECK_TRIGGERS:
             health_check_menu(executor, browser=browser)
+            continue
+
+        if text in EXEC_MODE_TRIGGERS:
+            manage_execution_mode(browser_pool)
             continue
 
         match = intent_engine.classify(text)
