@@ -769,7 +769,10 @@ pip install -r requirements.txt
 
 **OS側に別途インストールが必要なもの(pipだけでは入りません)**:
 
-- **Chrome + ChromeDriver**: Web操作に必須(ChromeDriverはSeleniumManagerが自動取得することが多いですが、環境によっては手動導入が必要です)
+- **Chrome + ChromeDriver**(または**Edge + msedgedriver**): Web操作に必須。ドライバは
+  Selenium Managerが自動取得することが多いですが、社内ネットワークでMicrosoft/Googleの
+  配布サーバーへの接続が制限されている場合、自動取得に失敗します(下記「ブラウザの
+  ドライバを手動で用意する」を参照)
 - **Tesseract OCR + Poppler**(OCR機能を使う場合のみ):
   - Windows: 公式インストーラでTesseract-OCR・Popplerを導入し、PATHを通す
   - macOS: `brew install tesseract tesseract-lang poppler`
@@ -785,6 +788,43 @@ pip install -r requirements.txt
 export PORTAL_USERNAME="your_id"
 export PORTAL_PASSWORD="your_password"
 ```
+
+### ブラウザのドライバを手動で用意する(社内ネットワーク等で自動取得できない場合)
+
+Web操作の初回実行時に次のようなエラーが出る場合、Seleniumがドライバ
+(chromedriver/msedgedriver)を自動取得しようとしてMicrosoft/Googleの配布サーバーに
+接続できていません(社内プロキシ・ファイアウォールで該当ドメインがブロックされている
+ケースでよく起きます)。
+
+```
+Unable to obtain driver for MicrosoftEdge; ...
+```
+
+この場合、ドライバを手動でダウンロードして場所を教えることで回避できます。
+
+1. 使っているブラウザのバージョンを確認する
+   - Chrome: アドレスバーに `chrome://version` と入力
+   - Edge: アドレスバーに `edge://version` と入力
+2. そのバージョンに対応するドライバをダウンロードする
+   - Chrome用(chromedriver): https://googlechromelabs.github.io/chrome-for-testing/
+   - Edge用(msedgedriver): https://developer.microsoft.com/en-us/microsoft-edge/tools/webdriver/
+   - (社内ネットワークからこれらのページ自体に接続できない場合は、IT部門に配布を依頼するか、
+     インターネットに接続できる別のPCでダウンロードしたものを持ち込んでください)
+3. ダウンロードした実行ファイル(`chromedriver.exe`/`msedgedriver.exe`)を、PC内の
+   好きな場所(例: `C:\tools\chromedriver.exe`)に置く
+4. 環境変数でそのパスを教える(コマンドプロンプト/PowerShellでツールを起動する前に設定):
+
+   ```powershell
+   $env:RPA_CHROME_DRIVER_PATH = "C:\tools\chromedriver.exe"
+   # Edgeを使う場合はこちら
+   $env:RPA_EDGE_DRIVER_PATH = "C:\tools\msedgedriver.exe"
+   ```
+
+   毎回設定するのが手間な場合は、Windowsの「システム環境変数」に恒久的に登録しておくと、
+   次回以降のコマンドプロンプト/PowerShell起動時から自動的に読み込まれます。
+
+環境変数が設定されていれば、Selenium Managerによる自動取得を行わず、指定したドライバを
+直接使うようになります。
 
 ## 実行
 

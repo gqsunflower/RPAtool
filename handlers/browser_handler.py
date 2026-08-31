@@ -127,22 +127,48 @@ class BrowserHandler:
 
             if self.browser == "edge":
                 from selenium.webdriver.edge.options import Options as EdgeOptions
+                from selenium.webdriver.edge.service import Service as EdgeService
 
                 options = EdgeOptions()
                 if self.headless:
                     options.add_argument("--headless=new")
                 options.add_argument("--no-sandbox")
                 options.add_argument("--disable-dev-shm-usage")
-                self._driver = webdriver.Edge(options=options)
+                driver_path = os.environ.get("RPA_EDGE_DRIVER_PATH")
+                service = EdgeService(executable_path=driver_path) if driver_path else None
+                try:
+                    self._driver = webdriver.Edge(options=options, service=service)
+                except Exception as e:  # noqa: BLE001
+                    raise RuntimeError(
+                        "Edgeの起動に失敗しました。SeleniumがEdge用のドライバ(msedgedriver)を"
+                        "自動取得できなかった可能性があります"
+                        "(社内ネットワークがMicrosoftの配布サーバーをブロックしている場合によく起きます)。"
+                        "msedgedriverを手動でダウンロードし、環境変数 RPA_EDGE_DRIVER_PATH に"
+                        "そのファイルのフルパスを設定してから再実行してください"
+                        "(詳細はREADMEの「ブラウザのドライバを手動で用意する」を参照): " + str(e)
+                    ) from e
             else:
                 from selenium.webdriver.chrome.options import Options as ChromeOptions
+                from selenium.webdriver.chrome.service import Service as ChromeService
 
                 options = ChromeOptions()
                 if self.headless:
                     options.add_argument("--headless=new")
                 options.add_argument("--no-sandbox")
                 options.add_argument("--disable-dev-shm-usage")
-                self._driver = webdriver.Chrome(options=options)
+                driver_path = os.environ.get("RPA_CHROME_DRIVER_PATH")
+                service = ChromeService(executable_path=driver_path) if driver_path else None
+                try:
+                    self._driver = webdriver.Chrome(options=options, service=service)
+                except Exception as e:  # noqa: BLE001
+                    raise RuntimeError(
+                        "Chromeの起動に失敗しました。Seleniumがドライバ(chromedriver)を"
+                        "自動取得できなかった可能性があります"
+                        "(社内ネットワークがGoogleの配布サーバーをブロックしている場合によく起きます)。"
+                        "chromedriverを手動でダウンロードし、環境変数 RPA_CHROME_DRIVER_PATH に"
+                        "そのファイルのフルパスを設定してから再実行してください"
+                        "(詳細はREADMEの「ブラウザのドライバを手動で用意する」を参照): " + str(e)
+                    ) from e
         return self._driver
 
     def _assert_domain_allowed(self, url: str, expected_url: str) -> None:

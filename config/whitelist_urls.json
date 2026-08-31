@@ -13,6 +13,9 @@
     },
     "tenki": {
       "url": "https://tenki.jp/"
+    },
+    "kishocho": {
+      "url": "https://www.jma.go.jp/jma/index.html"
     }
   }
 }

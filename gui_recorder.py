@@ -1912,6 +1912,8 @@ class RecorderApp(_AppBase):
                                          "params": {"site_key": key}})
                 except SiteNotWhitelistedError as e:
                     self.log(f"⚠ {e}")
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ ブラウザを開けませんでした: {e}")
 
             ttk.Button(f, text="このサイトを開いて登録", command=open_existing).pack(pady=4)
 
