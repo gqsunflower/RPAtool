@@ -28,6 +28,7 @@ DesktopHandler: 画面上の画像を探してマウス移動・クリックす�
 """
 from __future__ import annotations
 
+import ctypes
 import logging
 import time
 from pathlib import Path
@@ -129,9 +130,33 @@ class DesktopHandler:
         場合、対象を切り替えるたびにこれを呼んでおくこと。
         """
         win = self._pygetwindow_window(title_hint)
-        win.activate()
+        self._force_activate(win._hWnd)
         logger.info("ウィンドウをアクティブにしました: %s", title_hint)
         return f"activated: {title_hint}"
+
+    @staticmethod
+    def _force_activate(hwnd: int) -> None:
+        """SetForegroundWindowは、直前にユーザー入力を受け取っていないプロセスからの
+        呼び出しをWindows側の仕様で拒否することがある(GetLastErrorが0=成功のまま
+        呼び出し自体は失敗する、という紛らわしい既知の挙動)。ダミーのAltキー押下を
+        挟むことで、フォアグラウンド変更が許可されるようにする
+        (広く知られたWindows APIの回避策)。
+        """
+        user32 = ctypes.windll.user32
+        VK_MENU = 0x12
+        KEYEVENTF_KEYUP = 0x0002
+        SW_RESTORE = 9
+        user32.keybd_event(VK_MENU, 0, 0, 0)
+        try:
+            user32.ShowWindow(hwnd, SW_RESTORE)
+            if not user32.SetForegroundWindow(hwnd):
+                raise WindowNotFoundError(
+                    "ウィンドウをアクティブにできませんでした"
+                    "(Windows側の制限により拒否された可能性があります。リトライ設定を"
+                    "有効にしていれば自動で再試行されます)"
+                )
+        finally:
+            user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
 
     def set_window_size_by_title(
         self,

@@ -420,6 +420,8 @@ class MacroRecorder:
             print("  24) 最終列を取得する")
             print("  25) 新規ブックを立ち上げる")
             print("  26) 名前を変えずに上書き保存する")
+            print("  27) 開いているウィンドウのタイトル一覧を見る(目印探し用)")
+            print("  28) 別のウィンドウをアクティブにする(タイトル指定。複数Excel/他アプリの切替に)")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -476,10 +478,14 @@ class MacroRecorder:
                 self._record_excel_create()
             elif choice == "26":
                 self._record_excel_save()
+            elif choice == "27":
+                self._record_desktop_list_titles()
+            elif choice == "28":
+                self._record_desktop_activate_window()
             elif choice == "0":
                 return
             else:
-                print("0〜26のいずれかを入力してください。\n")
+                print("0〜28のいずれかを入力してください。\n")
 
     def _record_excel_create(self) -> None:
         alias = self._ask(
@@ -1353,6 +1359,8 @@ class MacroRecorder:
             print("  8) ページ数を取得する")
             print("  9) 表(罫線あり)をCSVとして抽出する")
             print("  10) 埋め込み画像を抽出する")
+            print("  11) 開いているウィンドウのタイトル一覧を見る(目印探し用)")
+            print("  12) 別のウィンドウをアクティブにする(タイトル指定。PDFビューア等の切替に)")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -1377,10 +1385,14 @@ class MacroRecorder:
                 self._record_pdf_extract_tables()
             elif choice == "10":
                 self._record_pdf_extract_images()
+            elif choice == "11":
+                self._record_desktop_list_titles()
+            elif choice == "12":
+                self._record_desktop_activate_window()
             elif choice == "0":
                 return
             else:
-                print("0〜10のいずれかを入力してください。\n")
+                print("0〜12のいずれかを入力してください。\n")
 
     def _record_pdf_get_page_count(self) -> None:
         r1 = self._ask_sluttable_value("対象PDFのパス")
@@ -1751,6 +1763,9 @@ class MacroRecorder:
             print("  12) 表示倍率(ズーム)を指定する")
             print("  13) 番号指定で操作する(表のセル読み取り・ボタン/入力欄/")
             print("      チェックボックス/トグル/プルダウンをプレビューして選ぶ)")
+            print("  14) 開いているウィンドウのタイトル一覧を見る(目印探し用)")
+            print("  15) 別のウィンドウをアクティブにする(タイトル指定。SAP等、")
+            print("      クリックすると別プロセスの新規ウィンドウが開くサイト向け)")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -1781,10 +1796,14 @@ class MacroRecorder:
                 self._record_set_zoom()
             elif choice == "13":
                 self._record_index_menu()
+            elif choice == "14":
+                self._record_desktop_list_titles()
+            elif choice == "15":
+                self._record_desktop_activate_window()
             elif choice == "0":
                 return
             else:
-                print("0〜13のいずれかを入力してください。\n")
+                print("0〜15のいずれかを入力してください。\n")
 
     # ---------- 番号指定(インデックス)によるプレビュー付き操作 ----------
 
@@ -2463,6 +2482,9 @@ class MacroRecorder:
             print("  10) フォルダ内のファイル一覧を取得する")
             print("  11) ファイルを削除する")
             print("  12) フォルダを削除する")
+            print("  13) 開いているウィンドウのタイトル一覧を見る(目印探し用)")
+            print("  14) 別のウィンドウをアクティブにする(タイトル指定。エクスプローラーの")
+            print("      特定ウィンドウ切替等に)")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -2491,10 +2513,14 @@ class MacroRecorder:
                 self._record_explorer_delete(kind="file")
             elif choice == "12":
                 self._record_explorer_delete(kind="folder")
+            elif choice == "13":
+                self._record_desktop_list_titles()
+            elif choice == "14":
+                self._record_desktop_activate_window()
             elif choice == "0":
                 return
             else:
-                print("0〜12のいずれかを入力してください。\n")
+                print("0〜14のいずれかを入力してください。\n")
 
     def _record_explorer_path_exists(self) -> None:
         result = self._ask_sluttable_value("確認するパス(ファイル or フォルダ)")
@@ -2881,6 +2907,10 @@ class MacroRecorder:
         print("  (この一覧取得自体はマクロの手順として登録されません)\n")
 
     def _record_desktop_activate_window(self) -> None:
+        print("  ※ Webサイト側がSAP等で、クリック直後に別プロセスの新規ウィンドウが")
+        print("     開くようなケースでは、この手順が実行される時点でまだそのウィンドウが")
+        print("     開き切っていないことがあります。次のリトライ回数を1回以上にしておくと、")
+        print("     ウィンドウが見つかるまで自動で待ちながら再試行します。")
         result = self._ask_sluttable_value("アクティブにしたいウィンドウのタイトル(部分一致)")
         if result is None:
             print("  → キャンセルしました。\n")
@@ -2889,9 +2919,11 @@ class MacroRecorder:
         try:
             self.desktop.activate_window_by_title(test_value)
             print(f"  → 実際にアクティブにできました: {test_value}")
+            retry_cfg = self._ask_retry()
             self.steps.append({
                 "handler": "desktop", "action": "activate_window_by_title",
                 "params": {"title_hint": param_value},
+                "retry": retry_cfg,
             })
             print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
         except Exception as e:  # noqa: BLE001

@@ -74,12 +74,14 @@ DOMAIN_ACTIONS = {
         "セル範囲(1列/1行)をリストとして取得する",
         "値でセルを検索する", "表の末尾に1行追記する", "行を挿入する", "行を削除する",
         "セル範囲の値を空にする", "シートを削除する", "最終列を取得する",
+        "開いているウィンドウのタイトル一覧を見る", "ウィンドウをアクティブにする",
     ],
     "pdf": [
         "テキストを抽出する(ページ全体)", "複数PDFを結合する", "PDFを分割する",
         "PDFを回転する", "OCRでテキスト化する(ページ全体)",
         "範囲を指定してテキストを取得する", "ページ範囲を1ファイルに抜き出す",
         "ページ数を取得する", "表(罫線あり)をCSVとして抽出する", "埋め込み画像を抽出する",
+        "開いているウィンドウのタイトル一覧を見る", "ウィンドウをアクティブにする",
     ],
     "web": [
         "サイトを開く/切り替える", "クリックする", "入力する", "選択する",
@@ -88,12 +90,14 @@ DOMAIN_ACTIONS = {
         "チェックボックスをON/OFFする",
         "ウィンドウサイズを指定する", "ウィンドウ位置を指定する", "表示倍率(ズーム)を指定する",
         "番号指定で操作する(表/ボタン/入力欄/チェック/トグル/プルダウン)",
+        "開いているウィンドウのタイトル一覧を見る", "ウィンドウをアクティブにする",
     ],
     "explorer": [
         "パスを開く", "フォルダを作成する", "ファイルを移動する", "ファイルをコピーする",
         "フォルダを移動する", "フォルダをコピーする", "ファイル名を変更する", "フォルダ名を変更する",
         "パスが存在するか確認する", "フォルダ内のファイル一覧を取得する",
         "ファイルを削除する", "フォルダを削除する",
+        "開いているウィンドウのタイトル一覧を見る", "ウィンドウをアクティブにする",
     ],
     "process": ["exe/pyを実行する"],
     "desktop": [
@@ -1564,6 +1568,12 @@ class RecorderApp(_AppBase):
 
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
+        elif action == "開いているウィンドウのタイトル一覧を見る":
+            self._build_list_window_titles_form(f)
+
+        elif action == "ウィンドウをアクティブにする":
+            self._build_activate_window_form(f)
+
     # ---------- PDF ----------
 
     def _build_pdf(self, action: str) -> None:
@@ -1928,6 +1938,12 @@ class RecorderApp(_AppBase):
                     self.log(f"⚠ {e}")
 
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "開いているウィンドウのタイトル一覧を見る":
+            self._build_list_window_titles_form(f)
+
+        elif action == "ウィンドウをアクティブにする":
+            self._build_activate_window_form(f)
 
     # ---------- Web ----------
 
@@ -2386,6 +2402,12 @@ class RecorderApp(_AppBase):
 
             kind_combo.bind("<<ComboboxSelected>>", build_sub)
             build_sub()
+
+        elif action == "開いているウィンドウのタイトル一覧を見る":
+            self._build_list_window_titles_form(f)
+
+        elif action == "ウィンドウをアクティブにする":
+            self._build_activate_window_form(f)
 
     def _build_web_index_kind(self, parent: ttk.Frame, kind: str) -> None:
         """番号指定操作の一覧プレビュー(Listbox)+ 種類ごとの入力欄 + 登録ボタンを作る。"""
@@ -2858,6 +2880,12 @@ class RecorderApp(_AppBase):
 
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
+        elif action == "開いているウィンドウのタイトル一覧を見る":
+            self._build_list_window_titles_form(f)
+
+        elif action == "ウィンドウをアクティブにする":
+            self._build_activate_window_form(f)
+
     # ---------- 実行ファイル ----------
 
     def _build_process(self, action: str) -> None:
@@ -2941,6 +2969,64 @@ class RecorderApp(_AppBase):
                 self.log(f"⚠ {e}")
 
         ttk.Button(f, text="登録して実行", command=register_new).pack(pady=4)
+
+    # ---------- ウィンドウのタイトルによる操作(desktopハンドラ。複数の領域から共通で使う) ----------
+
+    def _build_list_window_titles_form(self, f: ttk.Frame) -> None:
+        """開いているウィンドウのタイトル一覧を見る(目印探し用。手順としては登録されない)。
+        Web/PDF/エクスプローラー/デスクトップいずれの操作からも、後述の
+        「ウィンドウをアクティブにする」の目印探しとして共通で使う。
+        """
+        ttk.Label(
+            f, text="ウィンドウをアクティブにする/サイズ・位置を指定するときの"
+                    "目印探しに使います(この一覧取得自体は手順として登録されません)。",
+            foreground="#557", justify="left",
+        ).pack(anchor="w", pady=(0, 6))
+
+        def on_submit():
+            try:
+                titles = self.recorder.desktop.list_window_titles()
+            except Exception as e:  # noqa: BLE001
+                self.log(f"⚠ {e}")
+                return
+            if not titles:
+                self.log("(今開いているウィンドウが見つかりませんでした)")
+                return
+            for t in titles:
+                self.log(f"  - {t}")
+
+        ttk.Button(f, text="一覧を表示する", command=on_submit).pack(pady=6)
+
+    def _build_activate_window_form(self, f: ttk.Frame) -> None:
+        """指定した文字列(部分一致)を含むウィンドウをアクティブにする(handler=desktop)。
+        SAP等、クリックすると別プロセスの新規ウィンドウが開くサイトへの対処として、
+        Web/PDF/エクスプローラーの操作の合間にも挟めるよう共通化している。
+        """
+        ttk.Label(
+            f, text="※ Webサイト側がSAP等で、クリック直後に別プロセスの新規ウィンドウが\n"
+                    "   開くようなケースでは、この手順の実行時点でまだそのウィンドウが\n"
+                    "   開き切っていないことがあります。登録時のリトライ回数を1回以上に\n"
+                    "   しておくと、ウィンドウが見つかるまで自動で待ちながら再試行します。",
+            foreground="#557", justify="left",
+        ).pack(anchor="w", pady=(0, 6))
+        title_field = ValueSlotField(f, "対象ウィンドウのタイトル(部分一致)")
+        title_field.pack(fill="x", pady=4)
+
+        def on_submit():
+            title_test, title_param, _ = title_field.get()
+            try:
+                self.recorder.desktop.activate_window_by_title(title_test)
+                self.log(f"→ アクティブにできました: {title_test}")
+                retry_cfg = self._ask_retry()
+                self.register_step({
+                    "handler": "desktop", "action": "activate_window_by_title",
+                    "params": {"title_hint": title_param},
+                    "retry": retry_cfg,
+                })
+            except Exception as e:  # noqa: BLE001
+                self.log(f"⚠ {e}")
+
+        ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
     # ---------- デスクトップ ----------
 
@@ -3131,43 +3217,10 @@ class RecorderApp(_AppBase):
             ttk.Button(f, text="撮影する(手順としては登録されません)", command=on_submit).pack(pady=6)
 
         elif action == "開いているウィンドウのタイトル一覧を見る":
-            ttk.Label(
-                f, text="ウィンドウをアクティブにする/サイズ・位置を指定するときの"
-                        "目印探しに使います(この一覧取得自体は手順として登録されません)。",
-                foreground="#557", justify="left",
-            ).pack(anchor="w", pady=(0, 6))
-
-            def on_submit():
-                try:
-                    titles = self.recorder.desktop.list_window_titles()
-                except Exception as e:  # noqa: BLE001
-                    self.log(f"⚠ {e}")
-                    return
-                if not titles:
-                    self.log("(今開いているウィンドウが見つかりませんでした)")
-                    return
-                for t in titles:
-                    self.log(f"  - {t}")
-
-            ttk.Button(f, text="一覧を表示する", command=on_submit).pack(pady=6)
+            self._build_list_window_titles_form(f)
 
         elif action == "ウィンドウをアクティブにする":
-            title_field = ValueSlotField(f, "対象ウィンドウのタイトル(部分一致)")
-            title_field.pack(fill="x", pady=4)
-
-            def on_submit():
-                title_test, title_param, _ = title_field.get()
-                try:
-                    self.recorder.desktop.activate_window_by_title(title_test)
-                    self.log(f"→ アクティブにできました: {title_test}")
-                    self.register_step({
-                        "handler": "desktop", "action": "activate_window_by_title",
-                        "params": {"title_hint": title_param},
-                    })
-                except Exception as e:  # noqa: BLE001
-                    self.log(f"⚠ {e}")
-
-            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+            self._build_activate_window_form(f)
 
         elif action == "ウィンドウサイズを指定する(タイトル指定)":
             ttk.Label(
