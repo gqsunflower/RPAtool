@@ -2427,6 +2427,13 @@ class MacroRecorder:
             return
         test_value, param_value = result
 
+        print("  用紙サイズを選んでください(空Enterで既定のA4):")
+        print("    A3 / A4 / A5 / B4 / B5 / Letter / Legal")
+        paper_size_raw = self._ask("  用紙サイズ> ").strip()
+        paper_size = paper_size_raw or None
+
+        landscape = self._ask("  横向きで保存しますか? (y/N): ").lower() == "y"
+
         scale_raw = self._ask(
             "  倍率を指定しますか?(1ページに収めたい場合など。空Enterで既定値1.0): "
         )
@@ -2435,14 +2442,20 @@ class MacroRecorder:
         except ValueError:
             scale = 1.0
 
-        landscape = self._ask("  横向きで保存しますか? (y/N): ").lower() == "y"
+        grayscale = self._ask("  白黒(モノクロ)で保存しますか? (y/N。既定はカラー): ").lower() == "y"
 
         try:
-            self.browser.save_page_as_pdf(test_value, scale=scale, landscape=landscape)
+            self.browser.save_page_as_pdf(
+                test_value, scale=scale, landscape=landscape,
+                paper_size=paper_size, grayscale=grayscale,
+            )
             print(f"  → 実際にPDFとして保存できました: {test_value}")
             self.steps.append({
                 "handler": "browser", "action": "save_page_as_pdf",
-                "params": {"save_path": param_value, "scale": scale, "landscape": landscape},
+                "params": {
+                    "save_path": param_value, "scale": scale, "landscape": landscape,
+                    "paper_size": paper_size, "grayscale": grayscale,
+                },
             })
             print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
         except Exception as e:  # noqa: BLE001

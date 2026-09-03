@@ -2150,10 +2150,22 @@ class RecorderApp(_AppBase):
             field = ValueSlotField(f, "保存先PDFのパス")
             field.add_button("参照...", lambda: field.browse_save_file(".pdf"))
             field.pack(fill="x", pady=4)
-            scale_field = PlainField(f, "倍率(1ページに収めたい場合等)", default="1.0")
-            scale_field.pack(fill="x", pady=4)
+
+            ttk.Label(f, text="用紙サイズ:").pack(anchor="w")
+            paper_size_combo = ttk.Combobox(
+                f, state="readonly",
+                values=["A4(既定)", "A3", "A5", "B4", "B5", "Letter", "Legal"],
+            )
+            paper_size_combo.current(0)
+            paper_size_combo.pack(fill="x", pady=(0, 4))
+
             landscape_field = BoolField(f, "横向きで保存する")
             landscape_field.pack(anchor="w", pady=2)
+            grayscale_field = BoolField(f, "白黒(モノクロ)で保存する(オフ=カラー)")
+            grayscale_field.pack(anchor="w", pady=2)
+
+            scale_field = PlainField(f, "倍率(1ページに収めたい場合等)", default="1.0")
+            scale_field.pack(fill="x", pady=4)
 
             def on_submit():
                 test_v, param_v, _ = field.get()
@@ -2162,12 +2174,21 @@ class RecorderApp(_AppBase):
                 except ValueError:
                     scale = 1.0
                 landscape = landscape_field.get()
+                grayscale = grayscale_field.get()
+                paper_label = paper_size_combo.get()
+                paper_size = None if paper_label.startswith("A4") else paper_label
                 try:
-                    self.recorder.browser.save_page_as_pdf(test_v, scale=scale, landscape=landscape)
+                    self.recorder.browser.save_page_as_pdf(
+                        test_v, scale=scale, landscape=landscape,
+                        paper_size=paper_size, grayscale=grayscale,
+                    )
                     self.log(f"→ PDF保存できました: {test_v}")
                     self.register_step({
                         "handler": "browser", "action": "save_page_as_pdf",
-                        "params": {"save_path": param_v, "scale": scale, "landscape": landscape},
+                        "params": {
+                            "save_path": param_v, "scale": scale, "landscape": landscape,
+                            "paper_size": paper_size, "grayscale": grayscale,
+                        },
                     })
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")

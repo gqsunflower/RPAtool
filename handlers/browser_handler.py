@@ -112,6 +112,18 @@ def _build_launch_error(browser_label: str, driver_name: str, env_var: str, exc:
     )
 
 
+# save_page_as_pdf の paper_size 用: 縦置き基準の用紙サイズ(インチ)
+_PDF_PAPER_SIZES_INCHES: dict[str, tuple[float, float]] = {
+    "a3": (11.69, 16.54),
+    "a4": (8.27, 11.69),
+    "a5": (5.83, 8.27),
+    "b4": (10.12, 14.33),
+    "b5": (7.17, 10.12),
+    "letter": (8.5, 11.0),
+    "legal": (8.5, 14.0),
+}
+
+
 class BrowserHandler:
     def __init__(self, whitelist_path: Path, headless: bool = True, browser: str = "chrome"):
         """browser: "chrome"(既定)または"edge"。EdgeはChromiumベースのため、
@@ -1177,37 +1189,79 @@ class BrowserHandler:
         save_path: str,
         scale: float = 1.0,
         landscape: bool = False,
+        paper_size: str | None = None,
         paper_width: float = 8.27,
         paper_height: float = 11.69,
         margin: float = 0.4,
         print_background: bool = True,
+        grayscale: bool = False,
     ) -> str:
         """今表示している画面を、Chromeの印刷機能(DevTools Protocol)でPDFとして
         保存する。scale は縮尺(1.0=100%)で、内容を1ページに収めたい場合は
-        小さい値(例: 0.7)を指定する。用紙サイズは既定でA4(単位: インチ)。
+        小さい値(例: 0.7)を指定する。
+
+        paper_size に "A3"/"A4"/"A5"/"B4"/"B5"/"Letter"/"Legal" のいずれかを
+        指定すると、それに応じた用紙サイズ(縦置き基準のインチ数)を使う
+        (paper_width/paper_height より優先される)。省略時は paper_width/
+        paper_height を直接使う(既定はA4)。landscape=Trueで横向きに回転する
+        (用紙サイズ自体は変わらない)。
+
+        grayscale=Trueにすると、印刷前にページへ一時的にCSSのグレースケール
+        フィルタをかけてから印刷し(=見た目としての白黒印刷相当)、印刷後に
+        元の表示へ戻す。ChromeのDevTools Protocolにはモノクロ印刷という設定
+        項目自体は無いため、この方式で代替している。
         """
         self._assert_still_on_site()
         driver = self._get_driver()
 
-        result = driver.execute_cdp_cmd("Page.printToPDF", {
-            "landscape": landscape,
-            "printBackground": print_background,
-            "scale": scale,
-            "paperWidth": paper_width,
-            "paperHeight": paper_height,
-            "marginTop": margin,
-            "marginBottom": margin,
-            "marginLeft": margin,
-            "marginRight": margin,
-            "preferCSSPageSize": False,
-        })
+        if paper_size:
+            key = paper_size.strip().lower()
+            if key not in _PDF_PAPER_SIZES_INCHES:
+                raise ValueError(
+                    f"不明な用紙サイズです: {paper_size!r}"
+                    f"(指定できるのは {', '.join(sorted(_PDF_PAPER_SIZES_INCHES))} のいずれか。"
+                    f"それ以外のサイズにしたい場合は paper_size を省略し、"
+                    f"paper_width/paper_height をインチで直接指定してください)"
+                )
+            paper_width, paper_height = _PDF_PAPER_SIZES_INCHES[key]
+
+        if grayscale:
+            driver.execute_script(
+                "var s = document.createElement('style');"
+                "s.id = '__rpa_print_grayscale__';"
+                "s.innerHTML = 'html { filter: grayscale(100%) !important; }';"
+                "document.head.appendChild(s);"
+            )
+        try:
+            result = driver.execute_cdp_cmd("Page.printToPDF", {
+                "landscape": landscape,
+                "printBackground": print_background,
+                "scale": scale,
+                "paperWidth": paper_width,
+                "paperHeight": paper_height,
+                "marginTop": margin,
+                "marginBottom": margin,
+                "marginLeft": margin,
+                "marginRight": margin,
+                "preferCSSPageSize": False,
+            })
+        finally:
+            if grayscale:
+                driver.execute_script(
+                    "var s = document.getElementById('__rpa_print_grayscale__');"
+                    "if (s) { s.remove(); }"
+                )
 
         import base64
         out = Path(save_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         with open(out, "wb") as f:
             f.write(base64.b64decode(result["data"]))
-        logger.info("画面をPDFとして保存しました: %s (scale=%s)", out, scale)
+        logger.info(
+            "画面をPDFとして保存しました: %s (scale=%s, 用紙=%.2fx%.2fインチ, "
+            "横向き=%s, グレースケール=%s)",
+            out, scale, paper_width, paper_height, landscape, grayscale,
+        )
         return str(out)
 
     def close(self) -> str:
