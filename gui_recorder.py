@@ -35,6 +35,7 @@ sys.path.insert(0, str(BASE_DIR))
 
 from engine.recorder import MacroRecorder  # noqa: E402
 from handlers.browser_handler import (  # noqa: E402
+    PDF_PAPER_SIZES_INCHES,
     BrowserHandler,
     ElementNotFoundError,
     SiteNotWhitelistedError,
@@ -2151,11 +2152,15 @@ class RecorderApp(_AppBase):
             field.add_button("参照...", lambda: field.browse_save_file(".pdf"))
             field.pack(fill="x", pady=4)
 
+            # 用紙サイズの選択肢はハンドラ側の一覧(PDF_PAPER_SIZES_INCHES)から
+            # 生成する(手打ちで別々に持つと、片方だけ更新されたときにズレるため)。
+            paper_size_display = {"letter": "Letter", "legal": "Legal"}
+            other_sizes = [k for k in PDF_PAPER_SIZES_INCHES if k != "a4"]
+            paper_size_values = ["既定(A4)"] + [
+                paper_size_display.get(k, k.upper()) for k in other_sizes
+            ]
             ttk.Label(f, text="用紙サイズ:").pack(anchor="w")
-            paper_size_combo = ttk.Combobox(
-                f, state="readonly",
-                values=["A4(既定)", "A3", "A5", "B4", "B5", "Letter", "Legal"],
-            )
+            paper_size_combo = ttk.Combobox(f, state="readonly", values=paper_size_values)
             paper_size_combo.current(0)
             paper_size_combo.pack(fill="x", pady=(0, 4))
 
@@ -2175,8 +2180,7 @@ class RecorderApp(_AppBase):
                     scale = 1.0
                 landscape = landscape_field.get()
                 grayscale = grayscale_field.get()
-                paper_label = paper_size_combo.get()
-                paper_size = None if paper_label.startswith("A4") else paper_label
+                paper_size = None if paper_size_combo.current() == 0 else paper_size_combo.get()
                 try:
                     self.recorder.browser.save_page_as_pdf(
                         test_v, scale=scale, landscape=landscape,
@@ -2508,7 +2512,7 @@ class RecorderApp(_AppBase):
                 extra_frame, textvariable=preview_var, foreground="#25a", wraplength=420, justify="left",
             ).pack(anchor="w", pady=(6, 2))
 
-            def update_preview(*_args) -> None:
+            def update_preview_now() -> None:
                 sel = listbox.curselection()
                 if not sel or not items:
                     preview_var.set("(一覧から表を選んでください)")
@@ -2524,9 +2528,19 @@ class RecorderApp(_AppBase):
                 except Exception as e:  # noqa: BLE001
                     preview_var.set(f"⚠ 取得できませんでした: {e}")
 
-            listbox.bind("<<ListboxSelect>>", update_preview, add="+")
-            row_field.var.trace_add("write", update_preview)
-            col_field.var.trace_add("write", update_preview)
+            # 行・列を1文字入力するたびに実ブラウザへ問い合わせると、入力中に
+            # 何度も通信が走ってGUIがもたつくため、入力が一瞬止まってから
+            # まとめて1回だけ問い合わせる(デバウンス)。
+            preview_job: dict[str, str | None] = {"id": None}
+
+            def schedule_preview_update(*_args) -> None:
+                if preview_job["id"] is not None:
+                    self.after_cancel(preview_job["id"])
+                preview_job["id"] = self.after(300, update_preview_now)
+
+            listbox.bind("<<ListboxSelect>>", schedule_preview_update, add="+")
+            row_field.var.trace_add("write", schedule_preview_update)
+            col_field.var.trace_add("write", schedule_preview_update)
 
             def on_submit():
                 idx = selected_index()

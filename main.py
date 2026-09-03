@@ -432,6 +432,8 @@ def _insert_step_interactive(
                 if "{{" in str(path):
                     continue
                 rec.excel.load_workbook(path, alias=params.get("alias"))
+            elif s.get("action") == "create_workbook":
+                rec.excel.create_workbook(alias=params.get("alias"))
             elif s.get("action") == "switch_workbook":
                 alias = params.get("alias")
                 if alias in rec.excel.list_open_workbooks():

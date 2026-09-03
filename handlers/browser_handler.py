@@ -113,7 +113,7 @@ def _build_launch_error(browser_label: str, driver_name: str, env_var: str, exc:
 
 
 # save_page_as_pdf の paper_size 用: 縦置き基準の用紙サイズ(インチ)
-_PDF_PAPER_SIZES_INCHES: dict[str, tuple[float, float]] = {
+PDF_PAPER_SIZES_INCHES: dict[str, tuple[float, float]] = {
     "a3": (11.69, 16.54),
     "a4": (8.27, 11.69),
     "a5": (5.83, 8.27),
@@ -1216,14 +1216,14 @@ class BrowserHandler:
 
         if paper_size:
             key = paper_size.strip().lower()
-            if key not in _PDF_PAPER_SIZES_INCHES:
+            if key not in PDF_PAPER_SIZES_INCHES:
                 raise ValueError(
                     f"不明な用紙サイズです: {paper_size!r}"
-                    f"(指定できるのは {', '.join(sorted(_PDF_PAPER_SIZES_INCHES))} のいずれか。"
+                    f"(指定できるのは {', '.join(sorted(PDF_PAPER_SIZES_INCHES))} のいずれか。"
                     f"それ以外のサイズにしたい場合は paper_size を省略し、"
                     f"paper_width/paper_height をインチで直接指定してください)"
                 )
-            paper_width, paper_height = _PDF_PAPER_SIZES_INCHES[key]
+            paper_width, paper_height = PDF_PAPER_SIZES_INCHES[key]
 
         if grayscale:
             driver.execute_script(

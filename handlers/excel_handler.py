@@ -371,9 +371,13 @@ class ExcelHandler:
         paste_type:
           "values"   既定。計算済みの値のみを貼り付ける(数式は貼り付けない)。
           "formulas" 数式をそのまま貼り付ける(セル参照は自動調整されない。
-                     元のファイルを読み直して数式文字列を取得するため、
-                     load_workbook後にこのブック上でまだ保存していない変更が
-                     元セルにある場合、その変更は数式の取得には反映されない)。
+                     ファイルを読み直して数式文字列を取得するため、この
+                     ブック上でまだ保存していない変更が元セルにある場合、
+                     その変更は数式の取得には反映されない。読み直す先は
+                     load_workbook時のパスだが、その後 save_workbook_as を
+                     呼んでいれば、以後はその保存先を読み直す。新規作成した
+                     ブック(create_workbook)でまだ一度も保存していない
+                     場合はエラーになる)。
           "all"      値/数式に加えて、数値の表示形式・フォント・塗りつぶし・
                      罫線・配置もあわせて貼り付ける(列幅/行高・条件付き書式・
                      コメント・入力規則は対象外)。
@@ -387,6 +391,12 @@ class ExcelHandler:
         if paste_type not in ("values", "formulas", "all"):
             raise ValueError(
                 f"paste_typeは 'values' / 'formulas' / 'all' のいずれかを指定してください: {paste_type}"
+            )
+        if paste_type in ("formulas", "all") and entry["path"] is None:
+            raise RuntimeError(
+                "このブックはまだ一度も保存先が指定されていません(新規作成したブック等)。"
+                "数式を貼り付けるには、先に save_workbook_as で保存先パスを指定してください"
+                "(数式は、保存済みのファイルを読み直して取得するため)。"
             )
 
         cells = ws[source_range]

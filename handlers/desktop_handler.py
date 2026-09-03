@@ -136,27 +136,63 @@ class DesktopHandler:
 
     @staticmethod
     def _force_activate(hwnd: int) -> None:
-        """SetForegroundWindowは、直前にユーザー入力を受け取っていないプロセスからの
-        呼び出しをWindows側の仕様で拒否することがある(GetLastErrorが0=成功のまま
-        呼び出し自体は失敗する、という紛らわしい既知の挙動)。ダミーのAltキー押下を
-        挟むことで、フォアグラウンド変更が許可されるようにする
-        (広く知られたWindows APIの回避策)。
+        """ウィンドウを最前面(アクティブ)にする。SetForegroundWindowは、直前に
+        ユーザー入力を受け取っていないプロセスからの呼び出しをWindows側の仕様で
+        拒否することがある(GetLastErrorが0=成功のまま呼び出し自体は失敗する、
+        という紛らわしい既知の挙動)。
+
+        まず AttachThreadInput で、今のフォアグラウンドウィンドウのスレッドと
+        自分の入力状態を一時的に結びつける方法を試す(実際のキー入力を発生させない、
+        より安全な回避策)。それでも失敗した場合のみ、最終手段としてダミーの
+        Altキー押下を挟む方法(広く知られたWindows APIの回避策だが、実際の
+        キーボード入力イベントを発生させるため、ユーザーが同じ瞬間に本物の
+        Altキーを操作している場合に干渉しうる)を試す。
+
+        最小化されている場合のみ ShowWindow で復元する(最大化されている
+        ウィンドウを誤って元のサイズへ戻してしまわないようにするため)。
         """
-        user32 = ctypes.windll.user32
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        SW_RESTORE = 9
+
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, SW_RESTORE)
+
+        if user32.SetForegroundWindow(hwnd):
+            return
+
+        foreground_hwnd = user32.GetForegroundWindow()
+        current_thread_id = kernel32.GetCurrentThreadId()
+        foreground_thread_id = user32.GetWindowThreadProcessId(foreground_hwnd, None)
+        attached = False
+        try:
+            if foreground_thread_id and foreground_thread_id != current_thread_id:
+                attached = bool(
+                    user32.AttachThreadInput(current_thread_id, foreground_thread_id, True)
+                )
+            user32.BringWindowToTop(hwnd)
+            if user32.SetForegroundWindow(hwnd):
+                return
+        finally:
+            if attached:
+                user32.AttachThreadInput(current_thread_id, foreground_thread_id, False)
+
+        # AttachThreadInput でも許可されなかった場合の最終手段
         VK_MENU = 0x12
         KEYEVENTF_KEYUP = 0x0002
-        SW_RESTORE = 9
         user32.keybd_event(VK_MENU, 0, 0, 0)
         try:
-            user32.ShowWindow(hwnd, SW_RESTORE)
-            if not user32.SetForegroundWindow(hwnd):
-                raise WindowNotFoundError(
-                    "ウィンドウをアクティブにできませんでした"
-                    "(Windows側の制限により拒否された可能性があります。リトライ設定を"
-                    "有効にしていれば自動で再試行されます)"
-                )
+            if user32.SetForegroundWindow(hwnd):
+                return
         finally:
             user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+
+        err = ctypes.get_last_error()
+        raise WindowNotFoundError(
+            f"ウィンドウは見つかりましたが、最前面に表示できませんでした"
+            f"(Windowsエラーコード: {err}。Windows側の制限により拒否された可能性が"
+            f"あります。リトライ設定を有効にしていれば自動で再試行されます)"
+        )
 
     def set_window_size_by_title(
         self,
