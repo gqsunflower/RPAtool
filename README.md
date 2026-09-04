@@ -77,6 +77,28 @@
   送信することもできます。**複数のサイトを別タブで同時に開いたまま、タブを行き来しながら
   操作できます**(`open_registered_site` に `tab_alias` を指定して新規タブを開き、
   `switch_to_tab` で切り替え。ドメインの安全チェックもタブごとに独立して働きます)。
+
+  **フレームページ(`<frameset>`で画面が2分割・3分割等されているページや、`<iframe>`で
+  別画面を埋め込んでいるページ)にも対応しています。** Seleniumは既定ではフレームの中の
+  要素を扱えないため、まず対象のフレームへ`switch_to_frame`で明示的に切り替える必要が
+  あります。切り替えた後は、`switch_to_default_content`で元のページに戻るまで、
+  クリック・入力など**それ以外の操作は一切変更せずそのまま使えます**(フレーム切り替えは
+  「これから操作する対象を指定する」ためだけの手順で、既存の操作方法とは独立しています)。
+  - `list_frames`: 今のコンテキスト(既定はページ全体、フレームに切り替え済みならその中)に
+    ある`<frame>`/`<iframe>`を1番目から順に列挙する(手順としては登録されない、目印探し用)。
+  - `switch_to_frame`: `index`(list_framesの番号)、または`name_hint`
+    (name/id/title属性への部分一致。ページ構成の変化に強いため推奨)のどちらか一方を
+    指定してフレームへ切り替える。
+  - `switch_to_default_content`: フレームから抜けて、ページ全体(トップレベル)に戻る。
+    入れ子になったフレームの中にいる場合も、これ1回で一番外側まで戻る。
+  - `switch_to_parent_frame`: 入れ子になったフレームで、一番外側までは戻らず1段階だけ
+    上の親フレームに戻りたい場合に使う。
+
+    3分割フレーム(例: `<frameset cols="25%,75%">`の中にさらに`<frameset rows="...">`
+    がある構成)の場合、末端の`<frame>`はすべてトップレベルの`list_frames`で一度に
+    列挙できる(入れ子のframeset自体は`switch_to_frame`の対象にはならない)。
+    `<iframe>`の中にさらに`<iframe>`がある場合は、外側のiframeに切り替えてから
+    改めて`list_frames`を呼ぶと、その中のiframeが見えるようになる。
   そのほか、**画面から値を読み取る**(`get_text_by_selector`/`get_attribute_by_selector`。
   CSSセレクタで指定した要素の表示文字や属性値(href等)を取得し、store_asで変数に保存できる)、
   **一覧・表の1列を丸ごと読み取る**(`get_text_list_by_selector`。一致するすべての要素の文字を
@@ -486,6 +508,7 @@ Webサイト操作は最初にサイトを開いたときだけ選択が必要�
 | Web | 番号指定で表のセルを読み取る | `list_tables`/`get_table_cell_text`。1始まりの表番号・行番号・列番号を指定、登録前にプレビュー可 |
 | Web | 番号指定でクリック/入力/選択 | `list_clickable_elements`/`click_by_index`、`list_input_elements`/`type_by_index`、`list_dropdown_elements`/`select_by_index`。表示文字での特定が難しい場合の最終手段 |
 | Web | 番号指定でチェックボックス/トグルのON/OFF | `list_checkbox_elements`/`check_checkbox_by_index`、`list_toggle_elements`/`toggle_by_index`(role=switch/aria-pressed対応) |
+| Web | フレーム一覧取得/切り替え | `list_frames`/`switch_to_frame`/`switch_to_default_content`/`switch_to_parent_frame`。3分割等の`<frameset>`/`<iframe>`ページに対応 |
 | エクスプローラー | パスを開く | 既定のファイラー(エクスプローラー)でフォルダ/ファイルを開く |
 | エクスプローラー | フォルダ作成 / 移動 / コピー(ファイル・フォルダとも) | 移動・コピー先に同名のものがあれば既定で拒否(上書きは明示指定制) |
 | エクスプローラー | 名前を変更する(ファイル・フォルダとも) | `new_name`には名前のみ指定可(パス区切り文字は拒否)。変更先が既存なら既定で拒否 |

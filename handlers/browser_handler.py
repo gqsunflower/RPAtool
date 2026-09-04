@@ -362,6 +362,109 @@ class BrowserHandler:
     def list_open_tabs(self) -> list[str]:
         return list(self._tab_handles.keys())
 
+    # ---------- フレーム(<frame>/<iframe>。3分割フレームページ等) ----------
+    # Seleniumはフレーム内の要素を既定では扱えないため、フレームページ
+    # (<frameset>で3分割等されたページや、<iframe>で埋め込まれた別画面)を
+    # 操作するには、まず対象フレームへ switch_to_frame で明示的に切り替える
+    # 必要がある。切り替えた後は、switch_to_default_content で元のページに
+    # 戻るまで、click_by_text等の以降の操作はすべてそのフレーム内が対象になる
+    # (=フレーム切り替え以外の既存の操作は一切変更不要で、そのまま使える)。
+    # ネストしたフレーム(フレームの中にさらにフレームがある場合)は、
+    # list_frames→switch_to_frame を繰り返すことで奥へ進める。
+
+    def list_frames(self) -> list[dict]:
+        """今のコンテキスト(既定はページ全体、フレームに切り替え済みならその中)
+        にある<frame>/<iframe>を1番目から順に列挙する。name/id/title/src を
+        手がかりに、switch_to_frameで対象を指定する。
+        """
+        from selenium.webdriver.common.by import By
+
+        self._assert_still_on_site()
+        driver = self._get_driver()
+        elements = driver.find_elements(By.XPATH, "//frame | //iframe")
+        result = []
+        for i, el in enumerate(elements, start=1):
+            result.append({
+                "index": i,
+                "tag": el.tag_name,
+                "name": (el.get_attribute("name") or "").strip(),
+                "id": (el.get_attribute("id") or "").strip(),
+                "title": (el.get_attribute("title") or "").strip(),
+                "src": (el.get_attribute("src") or "").strip(),
+            })
+        return result
+
+    def switch_to_frame(self, index: int | None = None, name_hint: str | None = None) -> str:
+        """フレーム/iframeへ切り替える。indexとname_hintはどちらか一方を指定する。
+
+        index: list_framesで確認した番号(1始まり)。
+        name_hint: name/id/title属性のいずれかへの部分一致で対象を選ぶ
+                   (ページ構成が変わっても崩れにくいため、こちらを優先推奨)。
+
+        切り替え後は、switch_to_default_content(または一段だけ戻る
+        switch_to_parent_frame)を呼ぶまで、以降のクリック・入力等の操作は
+        すべてこのフレーム内が対象になる。
+        """
+        from selenium.webdriver.common.by import By
+
+        self._assert_still_on_site()
+        driver = self._get_driver()
+        elements = driver.find_elements(By.XPATH, "//frame | //iframe")
+        if not elements:
+            raise ElementNotFoundError(
+                "フレーム(frame/iframe)が見つかりませんでした"
+                "(今のコンテキストにフレームが無いか、既に別のフレームの中にいる"
+                "可能性があります。switch_to_default_contentで一度戻ってから"
+                "list_framesで確認してください)"
+            )
+
+        target = None
+        if index is not None:
+            if not (1 <= index <= len(elements)):
+                raise ElementNotFoundError(
+                    f"{index}番目のフレームは存在しません(今は{len(elements)}個です。"
+                    f"list_framesで番号を確認し直してください)"
+                )
+            target = elements[index - 1]
+        elif name_hint:
+            for el in elements:
+                attrs = (
+                    el.get_attribute("name") or "",
+                    el.get_attribute("id") or "",
+                    el.get_attribute("title") or "",
+                )
+                if any(name_hint in a for a in attrs):
+                    target = el
+                    break
+            if target is None:
+                raise ElementNotFoundError(
+                    f"name/id/titleに '{name_hint}' を含むフレームが見つかりませんでした"
+                )
+        else:
+            raise ValueError("indexまたはname_hintのいずれかを指定してください")
+
+        driver.switch_to.frame(target)
+        logger.info("フレームへ切り替えました: index=%s, name_hint=%s", index, name_hint)
+        return f"switched to frame (index={index}, name_hint={name_hint!r})"
+
+    def switch_to_default_content(self) -> str:
+        """フレームから抜けて、ページ全体(トップレベル)に戻る。
+        ネストしたフレームの奥にいる場合も、これ1回で一番外側まで戻る。
+        """
+        driver = self._get_driver()
+        driver.switch_to.default_content()
+        logger.info("フレームから元のページに戻りました")
+        return "switched to default content"
+
+    def switch_to_parent_frame(self) -> str:
+        """1つ上の親フレームにだけ戻る(ネストしたフレーム構成で、
+        一番外側までは戻らず1段階だけ戻りたい場合に使う)。
+        """
+        driver = self._get_driver()
+        driver.switch_to.parent_frame()
+        logger.info("親フレームへ戻りました")
+        return "switched to parent frame"
+
     def login(self, site_key: str) -> str:
         if site_key not in self._sites:
             raise SiteNotWhitelistedError(f"'{site_key}' はホワイトリストに登録されていません。")

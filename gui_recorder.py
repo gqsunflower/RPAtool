@@ -92,6 +92,8 @@ DOMAIN_ACTIONS = {
         "ウィンドウサイズを指定する", "ウィンドウ位置を指定する", "表示倍率(ズーム)を指定する",
         "番号指定で操作する(表/ボタン/入力欄/チェック/トグル/プルダウン)",
         "開いているウィンドウのタイトル一覧を見る", "ウィンドウをアクティブにする",
+        "フレーム一覧を見る", "フレームに切り替える", "元のページ(フレーム外)に戻る",
+        "1段階だけ親フレームに戻る",
     ],
     "explorer": [
         "パスを開く", "フォルダを作成する", "ファイルを移動する", "ファイルをコピーする",
@@ -2433,6 +2435,102 @@ class RecorderApp(_AppBase):
 
         elif action == "ウィンドウをアクティブにする":
             self._build_activate_window_form(f)
+
+        elif action == "フレーム一覧を見る":
+            ttk.Label(
+                f, text="3分割等のフレームページ(<frame>/<iframe>)を操作する前の目印探しに"
+                        "使います(この一覧取得自体は手順として登録されません)。",
+                foreground="#557", justify="left", wraplength=420,
+            ).pack(anchor="w", pady=(0, 6))
+
+            def on_submit():
+                try:
+                    frames = self.recorder.browser.list_frames()
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+                    return
+                if not frames:
+                    self.log("(今のフレームコンテキストにframe/iframeは見つかりませんでした)")
+                    return
+                for fr in frames:
+                    label = fr["name"] or fr["id"] or fr["title"] or "(名前なし)"
+                    self.log(f"  {fr['index']}. [{fr['tag']}] {label} (src: {fr['src']})")
+
+            ttk.Button(f, text="一覧を表示する", command=on_submit).pack(pady=6)
+
+        elif action == "フレームに切り替える":
+            ttk.Label(
+                f, text="番号(「フレーム一覧を見る」で確認)、またはname/id/titleの部分一致の"
+                        "どちらか一方を入力してください。両方入力した場合は番号を優先します。",
+                foreground="#557", justify="left", wraplength=420,
+            ).pack(anchor="w", pady=(0, 6))
+            index_field = PlainField(f, "番号(1始まり。空欄でname/id/titleを使う)", width=10)
+            index_field.pack(fill="x", pady=4)
+            hint_field = ValueSlotField(f, "name/id/titleの部分一致")
+            hint_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                index_raw = index_field.get().strip()
+                hint_test, hint_param, _ = hint_field.get()
+                index = int(index_raw) if index_raw.isdigit() else None
+                try:
+                    if index is not None:
+                        self.recorder.browser.switch_to_frame(index=index)
+                        self.log(f"→ {index}番目のフレームへ切り替えました")
+                        self.register_step({
+                            "handler": "browser", "action": "switch_to_frame",
+                            "params": {"index": index, "name_hint": None},
+                        })
+                    elif hint_test:
+                        self.recorder.browser.switch_to_frame(name_hint=hint_test)
+                        self.log(f"→ '{hint_test}' を含むフレームへ切り替えました")
+                        self.register_step({
+                            "handler": "browser", "action": "switch_to_frame",
+                            "params": {"index": None, "name_hint": hint_param},
+                        })
+                    else:
+                        self.log("⚠ 番号かname/id/titleのどちらかを入力してください")
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "元のページ(フレーム外)に戻る":
+            ttk.Label(
+                f, text="入れ子になっている場合も、これ1回で一番外側(トップレベル)まで戻ります。",
+                foreground="#557", justify="left", wraplength=420,
+            ).pack(anchor="w", pady=(0, 6))
+
+            def on_submit():
+                try:
+                    self.recorder.browser.switch_to_default_content()
+                    self.log("→ フレームから元のページへ戻りました")
+                    self.register_step({
+                        "handler": "browser", "action": "switch_to_default_content", "params": {},
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "1段階だけ親フレームに戻る":
+            ttk.Label(
+                f, text="入れ子になったフレームの中で、一番外側までは戻らず1段階だけ"
+                        "上の親フレームに戻りたい場合に使います。",
+                foreground="#557", justify="left", wraplength=420,
+            ).pack(anchor="w", pady=(0, 6))
+
+            def on_submit():
+                try:
+                    self.recorder.browser.switch_to_parent_frame()
+                    self.log("→ 親フレームへ戻りました")
+                    self.register_step({
+                        "handler": "browser", "action": "switch_to_parent_frame", "params": {},
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
     def _build_web_index_kind(self, parent: ttk.Frame, kind: str) -> None:
         """番号指定操作の一覧プレビュー(Listbox)+ 種類ごとの入力欄 + 登録ボタンを作る。"""

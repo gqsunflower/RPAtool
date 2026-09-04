@@ -1766,6 +1766,10 @@ class MacroRecorder:
             print("  14) 開いているウィンドウのタイトル一覧を見る(目印探し用)")
             print("  15) 別のウィンドウをアクティブにする(タイトル指定。SAP等、")
             print("      クリックすると別プロセスの新規ウィンドウが開くサイト向け)")
+            print("  16) フレーム一覧を見る(目印探し用。3分割等のフレームページ向け)")
+            print("  17) フレームに切り替える")
+            print("  18) 元のページ(フレームの外)に戻る")
+            print("  19) 1段階だけ親フレームに戻る(入れ子のフレーム構成向け)")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -1800,10 +1804,95 @@ class MacroRecorder:
                 self._record_desktop_list_titles()
             elif choice == "15":
                 self._record_desktop_activate_window()
+            elif choice == "16":
+                self._record_list_frames()
+            elif choice == "17":
+                self._record_switch_to_frame()
+            elif choice == "18":
+                self._record_switch_to_default_content()
+            elif choice == "19":
+                self._record_switch_to_parent_frame()
             elif choice == "0":
                 return
             else:
-                print("0〜15のいずれかを入力してください。\n")
+                print("0〜19のいずれかを入力してください。\n")
+
+    def _record_list_frames(self) -> None:
+        try:
+            frames = self.browser.list_frames()
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+            return
+        if not frames:
+            print("  (今のフレームコンテキストにframe/iframeは見つかりませんでした)\n")
+            return
+        print("  今のコンテキストにあるフレーム:")
+        for f in frames:
+            label = f["name"] or f["id"] or f["title"] or "(名前なし)"
+            print(f"    {f['index']}. [{f['tag']}] {label} (src: {f['src']})")
+        print("  (この一覧取得自体はマクロの手順として登録されません)\n")
+
+    def _record_switch_to_frame(self) -> None:
+        print("  切り替え方法を選んでください:")
+        print("    1) 番号で指定する(「フレーム一覧を見る」で確認した番号)")
+        print("    2) name/id/titleの部分一致で指定する(ページ構成の変化に強い。推奨)")
+        choice = self._ask("  番号(空Enterで2)> ").strip() or "2"
+        print()
+
+        if choice == "1":
+            idx_raw = self._ask("  何番目のフレームですか?: ").strip()
+            if not idx_raw.isdigit():
+                print("  → 数字で入力してください。この手順は登録しませんでした。\n")
+                return
+            index = int(idx_raw)
+            try:
+                self.browser.switch_to_frame(index=index)
+                print(f"  → 実際に{index}番目のフレームへ切り替えできました。")
+                self.steps.append({
+                    "handler": "browser", "action": "switch_to_frame",
+                    "params": {"index": index, "name_hint": None},
+                })
+                print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+            except Exception as e:  # noqa: BLE001
+                print(f"  ⚠ {e}\n")
+        else:
+            result = self._ask_sluttable_value("対象フレームのname/id/title(部分一致)")
+            if result is None:
+                print("  → キャンセルしました。\n")
+                return
+            test_value, param_value = result
+            try:
+                self.browser.switch_to_frame(name_hint=test_value)
+                print(f"  → 実際に '{test_value}' を含むフレームへ切り替えできました。")
+                self.steps.append({
+                    "handler": "browser", "action": "switch_to_frame",
+                    "params": {"index": None, "name_hint": param_value},
+                })
+                print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+            except Exception as e:  # noqa: BLE001
+                print(f"  ⚠ {e}\n")
+
+    def _record_switch_to_default_content(self) -> None:
+        try:
+            self.browser.switch_to_default_content()
+            print("  → 実際にフレームから元のページへ戻れました。")
+            self.steps.append({
+                "handler": "browser", "action": "switch_to_default_content", "params": {},
+            })
+            print("  → 登録しました。\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+
+    def _record_switch_to_parent_frame(self) -> None:
+        try:
+            self.browser.switch_to_parent_frame()
+            print("  → 実際に親フレームへ戻れました。")
+            self.steps.append({
+                "handler": "browser", "action": "switch_to_parent_frame", "params": {},
+            })
+            print("  → 登録しました。\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
 
     # ---------- 番号指定(インデックス)によるプレビュー付き操作 ----------
 
