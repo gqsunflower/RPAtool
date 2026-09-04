@@ -13,3 +13,10 @@ logs/*.log
 logs/screenshots/*
 !logs/screenshots/.gitkeep
 workdir/
+
+# マクロの.pyスクリプト化/exe化機能(main.pyの「スクリプト化」)で
+# 生成されるPyInstallerのビルド成果物。生成された.py自体は
+# (バックアップ・ログと違い)残すかどうかユーザーが選べるよう追跡対象のままにする。
+generated_scripts/build/
+generated_scripts/dist/
+generated_scripts/*.spec

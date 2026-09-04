@@ -19,6 +19,7 @@
     実行ログ出力   ... これまでの実行記録をExcelに書き出す
     パイプライン作成 / パイプライン実行 ... 登録済みマクロ同士を繋げて連続実行する
     ヘルスチェック ... 登録済みボタン等が今も見つかるか(非破壊)確認する
+    スクリプト化   ... 動作確認が済んだマクロを単体の.pyスクリプトに変換し、exe化もできる
 
 --dry-run を付けると実際には実行せず、実行予定のステップだけ表示します。
 --healthcheck-all を付けると、全マクロのヘルスチェックだけを実行して終了します
@@ -39,6 +40,7 @@ from datetime import datetime
 from pathlib import Path
 
 from engine.backup import backup_file
+from engine.codegen import UnsupportedMacroError, generate_script
 from engine.executor import MacroEditRequested, MacroExecutor
 from engine.health_check import HealthChecker
 from engine.intent_engine import IntentEngine
@@ -59,6 +61,7 @@ CONFIG_DIR = BASE_DIR / "config"
 LOG_DIR = BASE_DIR / "logs"
 SCREENSHOT_DIR = LOG_DIR / "screenshots"
 BACKUP_DIR = CONFIG_DIR / "backups"
+SCRIPTS_DIR = BASE_DIR / "generated_scripts"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -769,6 +772,103 @@ def export_run_log(executor: MacroExecutor) -> None:
     print(f"  → 実行ログをExcelに出力しました: {saved}\n")
 
 
+# ---------- マクロの.pyスクリプト化 / exe化 ----------
+# 「動作確認が済んで問題なく動くと分かったマクロ」を、他の人に配布したり
+# PyInstallerでexe化したりしやすい単体スクリプトに落とし込む機能。
+# 生成したスクリプトは engine/codegen.py の実装により、For/If/Gotoの
+# ような制御構文を含まない一直線のマクロのみに対応している。
+
+def _pyinstaller_available() -> bool:
+    import importlib.util
+    return importlib.util.find_spec("PyInstaller") is not None
+
+
+def convert_script_to_exe(script_path: Path) -> bool:
+    """PyInstallerで.pyファイルを単体exeに変換する(--onefile)。
+    戻り値: 成功したか。
+    """
+    import subprocess
+
+    if not _pyinstaller_available():
+        print(
+            "  ⚠ PyInstallerがインストールされていません。"
+            "'pip install pyinstaller' を実行してから、もう一度お試しください。\n"
+        )
+        return False
+
+    dist_dir = script_path.parent / "dist"
+    build_dir = script_path.parent / "build"
+    print(f"  PyInstallerでexe化します(少し時間がかかります): {script_path.name}")
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "PyInstaller", "--onefile",
+            "--distpath", str(dist_dir), "--workpath", str(build_dir),
+            "--specpath", str(script_path.parent), str(script_path),
+        ],
+        cwd=BASE_DIR,
+    )
+    if result.returncode != 0:
+        print("  ⚠ exe化に失敗しました。上記のログを確認してください。\n")
+        return False
+    exe_path = dist_dir / f"{script_path.stem}.exe"
+    print(f"  → 完成しました: {exe_path}\n")
+    return True
+
+
+def export_macro_as_script(executor: MacroExecutor) -> None:
+    macro_name = choose_macro(executor)
+    if macro_name is None:
+        return
+    macro_def = executor.get_macro(macro_name)
+    try:
+        SCRIPTS_DIR.mkdir(exist_ok=True)
+        script_path = SCRIPTS_DIR / f"{macro_name}.py"
+        generate_script(macro_name, macro_def, script_path)
+    except UnsupportedMacroError as e:
+        print(f"  ⚠ {e}\n")
+        return
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠ スクリプトの生成に失敗しました: {e}\n")
+        return
+    print(f"  → スクリプトを生成しました: {script_path}")
+    print("  (このスクリプトはプロジェクトのフォルダ内に置いたまま実行してください)\n")
+
+    if input("  続けてexe化しますか? (y/N): ").strip().lower() == "y":
+        convert_script_to_exe(script_path)
+
+
+def convert_existing_script_to_exe() -> None:
+    path_raw = input("  exe化したい.pyファイルのパスを入力してください: ").strip()
+    if not path_raw:
+        print("  → キャンセルしました。\n")
+        return
+    script_path = Path(path_raw)
+    if not script_path.exists():
+        print(f"  ⚠ ファイルが見つかりません: {script_path}\n")
+        return
+    convert_script_to_exe(script_path)
+
+
+def export_menu(executor: MacroExecutor) -> None:
+    while True:
+        print("マクロのスクリプト化/exe化では何をしますか?")
+        print("  1) 登録済みマクロを.pyスクリプトに変換する")
+        print("     (For/If/Gotoを含まない、一直線のマクロのみ対応)")
+        print("  2) 既存の.pyファイルをexe化する(要 pip install pyinstaller)")
+        print("  0) 戻る")
+        choice = input("番号> ").strip()
+        print()
+
+        if choice == "1":
+            export_macro_as_script(executor)
+        elif choice == "2":
+            convert_existing_script_to_exe()
+        elif choice == "0":
+            return
+        else:
+            print("0〜2のいずれかを入力してください。\n")
+
+
 # ---------- パイプライン(複数マクロの連続実行) ----------
 
 def create_pipeline(config_dir: Path, executor: MacroExecutor) -> None:
@@ -970,6 +1070,8 @@ def run_repl(dry_run: bool, headless: bool, browser: str = "chrome") -> None:
     print("登録済みボタン等が今も見つかるか確認したいときは 'ヘルスチェック' と入力してください。")
     print("マクロ実行時にブラウザ等の画面を表示するか(バックグラウンド/目で見て確認)を"
           "切り替えたいときは '実行方法設定' と入力してください。")
+    print("動作確認が済んだマクロを単体の.pyスクリプトやexeに変換したいときは"
+          "'スクリプト化' と入力してください。")
     print("終了するには 'exit' または 'quit' を入力してください。\n")
 
     RECORD_TRIGGERS = ("操作を登録", "マクロ登録", "レコーダー", "record")
@@ -983,6 +1085,7 @@ def run_repl(dry_run: bool, headless: bool, browser: str = "chrome") -> None:
     PIPELINE_RUN_TRIGGERS = ("パイプライン実行",)
     HEALTHCHECK_TRIGGERS = ("ヘルスチェック", "健全性チェック")
     EXEC_MODE_TRIGGERS = ("実行方法設定", "実行モード設定", "画面表示設定")
+    EXPORT_TRIGGERS = ("スクリプト化", "コード生成", "exe化", "exe変換")
 
     while True:
         try:
@@ -1056,6 +1159,10 @@ def run_repl(dry_run: bool, headless: bool, browser: str = "chrome") -> None:
 
         if text in EXEC_MODE_TRIGGERS:
             manage_execution_mode(browser_pool)
+            continue
+
+        if text in EXPORT_TRIGGERS:
+            export_menu(executor)
             continue
 
         match = intent_engine.classify(text)
