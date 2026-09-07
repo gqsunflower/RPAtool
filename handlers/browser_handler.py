@@ -112,6 +112,33 @@ def _build_launch_error(browser_label: str, driver_name: str, env_var: str, exc:
     )
 
 
+def _apply_automation_hiding(options) -> None:
+    """「Chromeは自動テストソフトウェアによって制御されています」という
+    インフォバーの非表示と、起動オプション由来の自動化痕跡を減らす設定を行う。
+    社内システムの中には、この手のフラグを検知して通常と異なる挙動(別ウィンドウで
+    開き直す等)をするものがあるため、Chrome/Edgeのどちらでも既定で適用する。
+    完全な検知回避を保証するものではない(navigator.webdriver以外の要素で
+    判定しているサイトには効かないことがある。その場合はデスクトップ操作を使うこと)。
+    """
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    options.add_argument("--disable-blink-features=AutomationControlled")
+
+
+def _hide_navigator_webdriver(driver) -> None:
+    """JavaScriptから navigator.webdriver を調べて自動操作を検知するサイト向けに、
+    その値をundefinedへ書き換える(新しいページに遷移するたびに再適用される)。
+    """
+    try:
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"},
+        )
+    except Exception:  # noqa: BLE001
+        # CDP非対応のドライバ/バージョンでも起動自体は継続できるようにする
+        pass
+
+
 # save_page_as_pdf の paper_size 用: 縦置き基準の用紙サイズ(インチ)
 PDF_PAPER_SIZES_INCHES: dict[str, tuple[float, float]] = {
     "a3": (11.69, 16.54),
@@ -188,6 +215,7 @@ class BrowserHandler:
                     options.add_argument("--headless=new")
                 options.add_argument("--no-sandbox")
                 options.add_argument("--disable-dev-shm-usage")
+                _apply_automation_hiding(options)
                 driver_path = os.environ.get("RPA_EDGE_DRIVER_PATH")
                 service = EdgeService(executable_path=driver_path) if driver_path else None
                 try:
@@ -203,12 +231,14 @@ class BrowserHandler:
                     options.add_argument("--headless=new")
                 options.add_argument("--no-sandbox")
                 options.add_argument("--disable-dev-shm-usage")
+                _apply_automation_hiding(options)
                 driver_path = os.environ.get("RPA_CHROME_DRIVER_PATH")
                 service = ChromeService(executable_path=driver_path) if driver_path else None
                 try:
                     self._driver = webdriver.Chrome(options=options, service=service)
                 except Exception as e:  # noqa: BLE001
                     raise _build_launch_error("Chrome", "chromedriver", "RPA_CHROME_DRIVER_PATH", e) from e
+            _hide_navigator_webdriver(self._driver)
         return self._driver
 
     def _assert_domain_allowed(self, url: str, expected_url: str) -> None:
