@@ -92,6 +92,7 @@ DOMAIN_ACTIONS = {
         "ウィンドウサイズを指定する", "ウィンドウ位置を指定する", "表示倍率(ズーム)を指定する",
         "番号指定で操作する(表/ボタン/入力欄/チェック/トグル/プルダウン)",
         "開いているウィンドウのタイトル一覧を見る", "ウィンドウをアクティブにする",
+        "操作対象を別のブラウザウィンドウに切り替える",
         "フレーム一覧を見る", "フレームに切り替える", "元のページ(フレーム外)に戻る",
         "1段階だけ親フレームに戻る",
     ],
@@ -2435,6 +2436,33 @@ class RecorderApp(_AppBase):
 
         elif action == "ウィンドウをアクティブにする":
             self._build_activate_window_form(f)
+
+        elif action == "操作対象を別のブラウザウィンドウに切り替える":
+            ttk.Label(
+                f, text="※「ウィンドウをアクティブにする」は画面の見た目を切り替えるだけで、\n"
+                        "   クリック等のWeb操作の対象までは自動では切り替わりません\n"
+                        "   (OS上の見た目のフォーカスと、Seleniumが内部的に操作対象と\n"
+                        "   しているウィンドウは別々の状態のため)。相手サイトがクリックすると\n"
+                        "   新しいブラウザウィンドウを開くタイプで、それが今のセッションで\n"
+                        "   開いたものである場合に、ここで操作対象も切り替えてください。",
+                foreground="#557", justify="left",
+            ).pack(anchor="w", pady=(0, 6))
+            title_field = ValueSlotField(f, "切り替え先ウィンドウのタイトル(部分一致)")
+            title_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                title_test, title_param, _ = title_field.get()
+                try:
+                    self.recorder.browser.switch_to_window_by_title(title_test)
+                    self.log(f"→ '{title_test}' を含むウィンドウへ操作対象を切り替えました")
+                    self.register_step({
+                        "handler": "browser", "action": "switch_to_window_by_title",
+                        "params": {"title_hint": title_param},
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
         elif action == "フレーム一覧を見る":
             ttk.Label(

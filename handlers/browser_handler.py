@@ -362,6 +362,47 @@ class BrowserHandler:
     def list_open_tabs(self) -> list[str]:
         return list(self._tab_handles.keys())
 
+    def switch_to_window_by_title(self, title_hint: str) -> str:
+        """今のSeleniumセッションが開いているウィンドウ/タブの中から、タイトルに
+        title_hint(部分一致)を含むものを探し、そこへ操作対象を切り替える。
+        以降のclick_by_text等のWeb操作は、切り替え後のウィンドウが対象になる。
+
+        デスクトップ操作の「ウィンドウをアクティブにする」(activate_window_by_title)
+        は、OS上で画面の最前面に表示するだけで、Seleniumの操作対象までは
+        自動では切り替わらない(画面上の見た目のフォーカスと、Seleniumが
+        内部的に操作対象としているウィンドウは別々の状態のため)。相手サイトが
+        クリックすると新しいブラウザウィンドウを開くタイプで、かつそれが今の
+        Seleniumセッションで開いたものである場合は、この手順もあわせて
+        登録してください。
+
+        一致するウィンドウが見つからない場合は、Seleniumの制御が及ばない
+        別プロセスのウィンドウ(SAP等の別アプリ)である可能性が高いです。
+        その場合はこの手順は使わず、デスクトップ操作(画像検索クリック・
+        座標クリック・キーボード入力)で操作してください。
+        """
+        driver = self._get_driver()
+        for handle in driver.window_handles:
+            driver.switch_to.window(handle)
+            if title_hint in (driver.title or ""):
+                # このウィンドウはopen_registered_site等で開いたものではなく、
+                # 事前登録されたホワイトリストURLが無いため、切り替えた時点の
+                # URLをそのまま「期待されるドメイン」として扱う(以後、別ドメインへ
+                # 飛んだ場合はこれまでどおり_assert_still_on_siteで検知できる)。
+                alias = f"_window_{title_hint}"
+                self._tab_handles[alias] = handle
+                self._tab_site_urls[alias] = driver.current_url
+                self._current_tab_alias = alias
+                logger.info(
+                    "タイトル一致でウィンドウへ切り替えました: '%s' -> %s",
+                    title_hint, driver.current_url,
+                )
+                return f"switched to window matching: {title_hint!r}"
+        raise ElementNotFoundError(
+            f"タイトルに '{title_hint}' を含むウィンドウが、今操作しているブラウザセッション内には"
+            f"見つかりませんでした(Seleniumの制御が及ばない別プロセスのウィンドウの可能性があります。"
+            f"その場合はこの手順ではなくデスクトップ操作で操作してください)"
+        )
+
     # ---------- フレーム(<frame>/<iframe>。3分割フレームページ等) ----------
     # Seleniumはフレーム内の要素を既定では扱えないため、フレームページ
     # (<frameset>で3分割等されたページや、<iframe>で埋め込まれた別画面)を

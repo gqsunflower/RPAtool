@@ -1770,6 +1770,10 @@ class MacroRecorder:
             print("  17) フレームに切り替える")
             print("  18) 元のページ(フレームの外)に戻る")
             print("  19) 1段階だけ親フレームに戻る(入れ子のフレーム構成向け)")
+            print("  20) 操作対象を別のブラウザウィンドウに切り替える(タイトル指定。")
+            print("      「15) 別のウィンドウをアクティブにする」は画面の見た目を")
+            print("      切り替えるだけで、クリック等の操作対象までは切り替わらない。")
+            print("      同じセッション内で新規ウィンドウが開いた場合はこちらも必要)")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -1812,10 +1816,36 @@ class MacroRecorder:
                 self._record_switch_to_default_content()
             elif choice == "19":
                 self._record_switch_to_parent_frame()
+            elif choice == "20":
+                self._record_switch_to_window_by_title()
             elif choice == "0":
                 return
             else:
-                print("0〜19のいずれかを入力してください。\n")
+                print("0〜20のいずれかを入力してください。\n")
+
+    def _record_switch_to_window_by_title(self) -> None:
+        print("  ※ デスクトップ操作の「ウィンドウをアクティブにする」は画面の見た目を")
+        print("     切り替えるだけで、click_by_text等のWeb操作の対象までは自動では")
+        print("     切り替わりません(OS上の見た目のフォーカスと、Seleniumが内部的に")
+        print("     操作対象としているウィンドウは別々の状態のため)。相手サイトが")
+        print("     クリックすると新しいブラウザウィンドウを開くタイプで、それが今の")
+        print("     セッションで開いたものである場合に、この手順であわせて操作対象も")
+        print("     切り替えてください。")
+        result = self._ask_sluttable_value("切り替え先ウィンドウのタイトル(部分一致)")
+        if result is None:
+            print("  → キャンセルしました。\n")
+            return
+        test_value, param_value = result
+        try:
+            self.browser.switch_to_window_by_title(test_value)
+            print(f"  → 実際に '{test_value}' を含むウィンドウへ操作対象を切り替えできました。")
+            self.steps.append({
+                "handler": "browser", "action": "switch_to_window_by_title",
+                "params": {"title_hint": param_value},
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
 
     def _record_list_frames(self) -> None:
         try:

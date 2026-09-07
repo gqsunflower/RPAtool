@@ -237,6 +237,26 @@
   押下を挟むことで回避)にも対応済みで、バックグラウンドで動いているツールから
   呼んでも確実にアクティブ化できます。
 
+  **重要な注意**: `activate_window_by_title`はOS上で画面の最前面に表示するだけで、
+  Web操作(`click_by_text`等)の対象までは自動では切り替わりません(画面上の
+  見た目のフォーカスと、Seleniumが内部的に操作対象としているウィンドウは
+  別々の状態のため)。新しく開いたウィンドウが**今操作しているSeleniumセッション
+  自身が開いたもの**(サイトのJSが`window.open()`等で開いた別ウィンドウ)である
+  場合は、`switch_to_window_by_title(title_hint)`もあわせて呼ぶ必要があります
+  (Web操作メニューの「操作対象を別のブラウザウィンドウに切り替える」)。
+  こちらはSeleniumが認識しているウィンドウ・タブの中からタイトルの部分一致で
+  探して切り替えるため、`activate_window_by_title`と違い、そのウィンドウが
+  今のセッションで開いたものでなければ(=別プロセスの場合)エラーになります。
+  逆に言えば、このエラーが出た場合は「Seleniumの制御が及ばない別プロセスの
+  ウィンドウである」と判断でき、その場合は上記のとおりデスクトップ操作のみで
+  操作してください。まとめると:
+  - 相手の新規ウィンドウが**同じブラウザセッション内**(JSの`window.open()`等) →
+    `activate_window_by_title`(画面表示用) + `switch_to_window_by_title`
+    (Web操作の対象切替用)の両方を、クリック直後に登録する。
+  - 相手の新規ウィンドウが**別プロセス**(SAP等) → `activate_window_by_title`のみ
+    登録し、以降はデスクトップ操作で操作する(`switch_to_window_by_title`は
+    エラーになるため使わない)。
+
   なお「ウィンドウをアクティブにする」/「開いているウィンドウのタイトル一覧を見る」は
   デスクトップ操作だけでなく、**Excel・Web・PDF・エクスプローラーの各操作メニューからも
   直接追加できます**(内部的にはすべて同じdesktopハンドラの手順として登録されるため、
@@ -509,6 +529,7 @@ Webサイト操作は最初にサイトを開いたときだけ選択が必要�
 | Web | 番号指定でクリック/入力/選択 | `list_clickable_elements`/`click_by_index`、`list_input_elements`/`type_by_index`、`list_dropdown_elements`/`select_by_index`。表示文字での特定が難しい場合の最終手段 |
 | Web | 番号指定でチェックボックス/トグルのON/OFF | `list_checkbox_elements`/`check_checkbox_by_index`、`list_toggle_elements`/`toggle_by_index`(role=switch/aria-pressed対応) |
 | Web | フレーム一覧取得/切り替え | `list_frames`/`switch_to_frame`/`switch_to_default_content`/`switch_to_parent_frame`。3分割等の`<frameset>`/`<iframe>`ページに対応 |
+| Web | 操作対象を別のブラウザウィンドウに切り替える | `switch_to_window_by_title`。同一Seleniumセッション内で新規に開いたウィンドウのタイトル部分一致で切り替える。`activate_window_by_title`(画面表示のみ)とは別に必要 |
 | エクスプローラー | パスを開く | 既定のファイラー(エクスプローラー)でフォルダ/ファイルを開く |
 | エクスプローラー | フォルダ作成 / 移動 / コピー(ファイル・フォルダとも) | 移動・コピー先に同名のものがあれば既定で拒否(上書きは明示指定制) |
 | エクスプローラー | 名前を変更する(ファイル・フォルダとも) | `new_name`には名前のみ指定可(パス区切り文字は拒否)。変更先が既存なら既定で拒否 |
