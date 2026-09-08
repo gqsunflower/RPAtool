@@ -20,6 +20,7 @@ MacroRecorderが内部に持つExcel/PDF/Web/エクスプローラー/実行フ�
 from __future__ import annotations
 
 import sys
+import time
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
@@ -109,6 +110,7 @@ DOMAIN_ACTIONS = {
         "文字列を入力する", "特殊キーを送信する", "スクリーンショットを撮る",
         "開いているウィンドウのタイトル一覧を見る", "ウィンドウをアクティブにする",
         "ウィンドウサイズを指定する(タイトル指定)", "ウィンドウ位置を指定する(タイトル指定)",
+        "表示倍率(ズーム)を指定する(キー操作)",
     ],
     "text": [
         "文字を探して切り出す", "文字を置換する", "日付・時刻を取得する",
@@ -632,6 +634,22 @@ class RecorderApp(_AppBase):
     def _submit_button(self, text: str = "動作確認して登録") -> ttk.Button:
         return ttk.Button(self.form_frame, text=text)
 
+    def _run_screen_search_hidden(self, fn, *args, **kwargs):
+        """pyautoguiで画面を検索する処理(locate_and_click等)を、レコーダー
+        ウィンドウ自体を一時的に隠してから実行する。対象画像のプレビュー
+        サムネイルがこのウィンドウ内に表示されているため、隠さずに実行すると
+        画面検索がそのサムネイル自身を見つけてクリックしてしまう(本来押し
+        たい対象とは別の場所を誤って押してしまう)ことがあるための対策。
+        """
+        self.withdraw()
+        self.update()
+        time.sleep(0.3)  # OS側の再描画がウィンドウを実際に消すまでの猶予
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            self.deiconify()
+            self.lift()
+
     def _ask_verify(self, image_or_text_default: str | None = None, is_image: bool = False) -> dict:
         """簡易な確認方法ダイアログ。「なし」「表示文字/画像が出る」「消える」「URL変化」を選ばせる。"""
         win = tk.Toplevel(self)
@@ -649,24 +667,34 @@ class RecorderApp(_AppBase):
         for text, val in options:
             ttk.Radiobutton(win, text=text, variable=choice_var, value=val).pack(anchor="w", padx=16)
 
-        detail_var = tk.StringVar()
-        detail_entry = ttk.Entry(win, textvariable=detail_var, width=40)
-        ttk.Label(win, text="(表示される文字 / 画像パスを指定する場合はここに)").pack(pady=(8, 0))
-        detail_entry.pack()
+        if is_image:
+            ttk.Label(
+                win, text="(空欄なら対象画像をそのまま使う。別の画像で確認したい場合は\n"
+                          "参照・クリップボードからの貼り付けのどちらかで指定してください)",
+                justify="left",
+            ).pack(pady=(8, 0))
+            detail_field = ImagePasteField(win, "確認用の画像(空欄可)")
+            detail_field.pack(padx=8, pady=(0, 4))
+        else:
+            detail_var = tk.StringVar()
+            detail_field = ttk.Entry(win, textvariable=detail_var, width=40)
+            ttk.Label(win, text="(表示される文字を指定する場合はここに)").pack(pady=(8, 0))
+            detail_field.pack()
 
         def on_ok():
             vtype = choice_var.get()
+            detail_value = detail_field.get()
             if vtype == "none":
                 result["type"] = "none"
             elif vtype in ("text_appears",):
-                result.update({"type": vtype, "value": detail_var.get(), "timeout": 10})
+                result.update({"type": vtype, "value": detail_value, "timeout": 10})
             elif vtype == "url_changes":
                 result.update({"type": vtype, "timeout": 10})
             elif vtype == "image_disappears":
-                val = detail_var.get() or (image_or_text_default or "")
+                val = detail_value or (image_or_text_default or "")
                 result.update({"type": vtype, "value": val, "timeout": 10})
             elif vtype == "image_appears":
-                result.update({"type": vtype, "value": detail_var.get(), "timeout": 10})
+                result.update({"type": vtype, "value": detail_value, "timeout": 10})
             win.destroy()
 
         ttk.Button(win, text="OK", command=on_ok).pack(pady=10)
@@ -3243,8 +3271,9 @@ class RecorderApp(_AppBase):
 
                 action_name = "locate_and_click" if is_click else "move_to_image"
                 try:
-                    getattr(self.recorder.desktop, action_name)(
-                        image_path, confidence=confidence, timeout=10, region=region
+                    self._run_screen_search_hidden(
+                        getattr(self.recorder.desktop, action_name),
+                        image_path, confidence=confidence, timeout=10, region=region,
                     )
                     self.log("→ 画像を見つけて実行できました")
                     step = {
@@ -3455,6 +3484,36 @@ class RecorderApp(_AppBase):
                     self.register_step({
                         "handler": "desktop", "action": "set_window_position_by_title",
                         "params": {"title_hint": title_param, "x": x, "y": y},
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "表示倍率(ズーム)を指定する(キー操作)":
+            ttk.Label(
+                f, text="今アクティブなウィンドウ(通常はブラウザ)が対象です。事前に\n"
+                        "「ウィンドウをアクティブにする」等で対象を前面にしておいてください。\n"
+                        "ブラウザの標準的な段階(25/33/50/67/75/80/90/100/110/125/150/\n"
+                        "175/200/250/300/400/500%)のうち、指定値に最も近いものになります。\n"
+                        "Webモードでの制御がうまくいかずデスクトップ操作に切り替えた場合等に使います。",
+                foreground="#557", justify="left",
+            ).pack(anchor="w", pady=(0, 6))
+            percent_field = PlainField(f, "表示倍率(%。100=等倍)", default="100")
+            percent_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                try:
+                    percent = float(percent_field.get() or "100")
+                except ValueError:
+                    self.log("⚠ 数字で入力してください")
+                    return
+                try:
+                    result = self.recorder.desktop.set_zoom(percent)
+                    self.log(f"→ 設定できました: {result}")
+                    self.register_step({
+                        "handler": "desktop", "action": "set_zoom",
+                        "params": {"percent": percent},
                     })
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")

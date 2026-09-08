@@ -44,6 +44,10 @@ class WindowNotFoundError(Exception):
     pass
 
 
+# set_zoom用: 主要ブラウザがCtrl+プラス/マイナスキーで刻む標準的な表示倍率(%)
+_ZOOM_LEVELS = [25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500]
+
+
 def _import_pyautogui():
     try:
         import pyautogui
@@ -336,6 +340,41 @@ class DesktopHandler:
         else:
             gui.press(keys[0])
         return f"pressed: {key}"
+
+    def set_zoom(self, percent: float = 100) -> str:
+        """今アクティブなウィンドウ(通常はブラウザ)の表示倍率を、Ctrl+0で
+        いったん100%にリセットしてから、テンキーの+/-キー(Ctrl+テンキー+/
+        Ctrl+テンキー-)で指定した%に最も近い段階まで変更する。
+
+        文字キーの'='/'-'ではなくテンキー側を使っているのは、日本語(JIS)
+        キーボード配列の環境では、OSの言語設定によって'='のキー割り当てが
+        '-'と同じ物理キーに化けてしまい、ズームイン・ズームアウトの区別が
+        つかなくなる既知の問題があるため(テンキーの+/-は配列に依存しない
+        固定のキーコードのため、この問題が起きない)。
+
+        Web操作の browser.set_zoom(CSSのzoomプロパティで正確な%を指定できる)
+        とは異なり、こちらはキーボード送信のため、対象がどのアプリでもよい
+        代わりに、ブラウザの標準的な飛び飛びの段階(25/33/50/67/75/80/90/
+        100/110/125/150/175/200/250/300/400/500%)の中から最も近い値にしか
+        調整できない。Webモードでの制御がうまくいかずデスクトップ操作に
+        切り替えた場合等、対象ウィンドウをSeleniumで操作できない状況で使う。
+        """
+        gui = self._gui()
+        gui.hotkey("ctrl", "0")
+        time.sleep(0.15)
+        target = min(_ZOOM_LEVELS, key=lambda z: abs(z - percent))
+        current_idx = _ZOOM_LEVELS.index(100)
+        target_idx = _ZOOM_LEVELS.index(target)
+        if target_idx > current_idx:
+            for _ in range(target_idx - current_idx):
+                gui.hotkey("ctrl", "add")
+                time.sleep(0.15)
+        elif target_idx < current_idx:
+            for _ in range(current_idx - target_idx):
+                gui.hotkey("ctrl", "subtract")
+                time.sleep(0.15)
+        logger.info("画面の表示倍率をキー操作で変更しました(目標%s%% -> 実際%s%%)", percent, target)
+        return f"zoomed to approximately {target}%"
 
     def take_screenshot(
         self, save_path: str, region: tuple[int, int, int, int] | list[int] | None = None

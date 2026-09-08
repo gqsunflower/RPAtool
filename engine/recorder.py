@@ -2995,6 +2995,8 @@ class MacroRecorder:
             print("  8) ウィンドウをアクティブにする(タイトル指定。Excel/PDF/エクスプローラー等)")
             print("  9) ウィンドウサイズを指定する(タイトル指定)")
             print("  10) ウィンドウ位置を指定する(タイトル指定)")
+            print("  11) 表示倍率(ズーム)を指定する(キー操作。Webモードでの制御が")
+            print("      うまくいかずデスクトップ操作に切り替えた場合等に使う)")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -3019,10 +3021,35 @@ class MacroRecorder:
                 self._record_desktop_set_window_size()
             elif choice == "10":
                 self._record_desktop_set_window_position()
+            elif choice == "11":
+                self._record_desktop_set_zoom()
             elif choice == "0":
                 return
             else:
-                print("0〜10のいずれかを入力してください。\n")
+                print("0〜11のいずれかを入力してください。\n")
+
+    def _record_desktop_set_zoom(self) -> None:
+        print("  ※ 今アクティブなウィンドウ(通常はブラウザ)が対象です。事前に")
+        print("     「ウィンドウをアクティブにする」等で対象を前面にしておいてください。")
+        print("     ブラウザの標準的な段階(25/33/50/67/75/80/90/100/110/125/150/")
+        print("     175/200/250/300/400/500%)のうち、指定値に最も近いものになります。")
+        raw = self._ask("  表示倍率を%で入力してください(空Enterで100=等倍): ").strip()
+        try:
+            percent = float(raw) if raw else 100.0
+        except ValueError:
+            print("  数字で入力してください。\n")
+            return
+
+        try:
+            result = self.desktop.set_zoom(percent)
+            print(f"  → 実際に設定できました: {result}")
+            self.steps.append({
+                "handler": "desktop", "action": "set_zoom",
+                "params": {"percent": percent},
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
 
     def _record_desktop_list_titles(self) -> None:
         try:
