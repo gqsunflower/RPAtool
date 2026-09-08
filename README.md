@@ -78,6 +78,21 @@
   操作できます**(`open_registered_site` に `tab_alias` を指定して新規タブを開き、
   `switch_to_tab` で切り替え。ドメインの安全チェックもタブごとに独立して働きます)。
 
+  **SharePoint等からのファイルのダウンロード/アップロードにも対応しています。**
+  - **アップロード**は、多くのサイト(SharePoint/OneDrive含む)で「アップロード」
+    ボタンの裏に実際には`<input type="file">`が(見た目上は隠れた状態で)
+    存在するため、既存の「入力する」(CSSセレクタ指定の`type_by_selector`)で
+    その要素にローカルのファイルパスを入力するだけで、追加の対応なしに動作します
+    (F12の開発者ツールで`input[type=file]`のセレクタを調べて指定してください)。
+  - **ダウンロード**は`set_download_directory`/`wait_for_download`で対応します。
+    ダウンロード先は既定で`workdir/downloads`ですが、`set_download_directory`で
+    変更できます。「ダウンロード」ボタンをクリックした直後に`wait_for_download`を
+    呼ぶと、保存が完了するまで待って実際のファイルパスを返します(`store_as`で
+    変数に保存すれば、後続のExcel操作等でそのままファイルを開けます)。
+    **バックグラウンド実行(headless)ではブラウザの仕様によりダウンロード自体が
+    既定でブロックされるため、このツールでは起動のたびにCDP経由で明示的に
+    許可しています**(通常は追加設定不要)。
+
   **フレームページ(`<frameset>`で画面が2分割・3分割等されているページや、`<iframe>`で
   別画面を埋め込んでいるページ)にも対応しています。** Seleniumは既定ではフレームの中の
   要素を扱えないため、まず対象のフレームへ`switch_to_frame`で明示的に切り替える必要が
@@ -455,6 +470,16 @@ Excelの中身が変わっていれば最終行等の値は変わりうる点に
 そのプレビューサムネイル自身を画面上で見つけてクリックしてしまうことがあった
 ための対策です。
 
+**画像ファイルのパスに日本語等(非ASCII文字)が含まれていても正しく動作します**:
+画像検索(`locate_and_click`/`move_to_image`/画像による実行後確認)は、あいまい
+一致(confidence指定)を使う場合は内部的にOpenCVの`cv2.imread`で画像を読み込み
+ますが、これはWindows環境で**非ASCII文字(日本語等)を含むパスを正しく読み込め
+ない既知の問題**があります(ファイルは実在するのに「見つからない」扱いに
+なってしまう)。このプロジェクト自体が「デスクトップ」「AI work」「RPAツール」等、
+日本語を含むフォルダ名の下にあることが多いため、素材画像やクリップボードから
+貼り付けた画像がこの問題の影響を受けないよう、画像はPIL側であらかじめ
+読み込んでからOpenCVへ渡す形にして回避しています(追加設定不要)。
+
 **注意点**:
 - GUIはTkinter(Python標準)で作られていますが、環境によっては
   `python3-tk` 等のOSパッケージの追加インストールが必要な場合があります。
@@ -561,6 +586,7 @@ Webサイト操作は最初にサイトを開いたときだけ選択が必要�
 | Web | 番号指定でクリック/入力/選択 | `list_clickable_elements`/`click_by_index`、`list_input_elements`/`type_by_index`、`list_dropdown_elements`/`select_by_index`。表示文字での特定が難しい場合の最終手段 |
 | Web | 番号指定でチェックボックス/トグルのON/OFF | `list_checkbox_elements`/`check_checkbox_by_index`、`list_toggle_elements`/`toggle_by_index`(role=switch/aria-pressed対応) |
 | Web | フレーム一覧取得/切り替え | `list_frames`/`switch_to_frame`/`switch_to_default_content`/`switch_to_parent_frame`。3分割等の`<frameset>`/`<iframe>`ページに対応 |
+| Web | ダウンロード先指定 / 完了待ち | `set_download_directory`/`wait_for_download`。SharePoint等からのファイルダウンロード用。headless実行でも動作 |
 | Web | 操作対象を別のブラウザウィンドウに切り替える | `switch_to_window_by_title`。同一Seleniumセッション内で新規に開いたウィンドウのタイトル部分一致で切り替える。`activate_window_by_title`(画面表示のみ)とは別に必要 |
 | エクスプローラー | パスを開く | 既定のファイラー(エクスプローラー)でフォルダ/ファイルを開く |
 | エクスプローラー | フォルダ作成 / 移動 / コピー(ファイル・フォルダとも) | 移動・コピー先に同名のものがあれば既定で拒否(上書きは明示指定制) |

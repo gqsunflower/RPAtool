@@ -247,14 +247,27 @@ class DesktopHandler:
             raise FileNotFoundError(f"画像ファイルが見つかりません: {p}")
         region = self._normalize_region(region)
 
+        # cv2.imread()はWindowsで非ASCII文字(日本語等)を含むパスを正しく開けない
+        # 既知の問題があり、ファイルが実在してもエラーにも例外にもならず"見つから
+        # ない"扱いになってしまう(このプロジェクト自体が「デスクトップ」「AI work」
+        # 「RPAツール」等、日本語を含むフォルダ名の下にあるため、通常の使い方でも
+        # 起きうる)。そのため、パス文字列をそのまま渡すのではなく、PIL側で
+        # あらかじめ画像を読み込んでおき(PILは非ASCIIパスでも問題なく読み込める)、
+        # 画像オブジェクトの方をpyautoguiへ渡すことでこの問題を回避している。
+        try:
+            from PIL import Image
+            needle = Image.open(p)
+        except Exception as e:  # noqa: BLE001
+            raise ImageNotFoundError(f"画像ファイルを読み込めませんでした: {p}({e})") from e
+
         deadline = time.monotonic() + timeout
         last_err: Exception | None = None
         while True:
             try:
-                box = gui.locateOnScreen(str(p), confidence=confidence, region=region)
+                box = gui.locateOnScreen(needle, confidence=confidence, region=region)
             except TypeError:
                 # opencv-python未インストール時、confidence引数は受け付けられない
-                box = gui.locateOnScreen(str(p), region=region)
+                box = gui.locateOnScreen(needle, region=region)
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 box = None
@@ -427,12 +440,21 @@ class DesktopHandler:
     def verify_image_disappears(self, value: str, timeout: int = 10) -> str:
         image_path, confidence = self._parse_verify_value(value)
         gui = self._gui()
+        # _locate()と同じ理由(非ASCIIパスでのcv2.imread失敗)により、パス文字列
+        # ではなくPILで読み込んだ画像オブジェクトを渡す。これを怠ると、パスが
+        # 読み込めないケースで常にbox=Noneになり、実際には画像が消えていなくても
+        # 「消えたこと」として誤って確認成功を返してしまう(検知漏れの原因になる)。
+        try:
+            from PIL import Image
+            needle = Image.open(image_path)
+        except Exception as e:  # noqa: BLE001
+            raise ImageNotFoundError(f"画像ファイルを読み込めませんでした: {image_path}({e})") from e
         deadline = time.monotonic() + timeout
         while True:
             try:
-                box = gui.locateOnScreen(image_path, confidence=confidence)
+                box = gui.locateOnScreen(needle, confidence=confidence)
             except TypeError:
-                box = gui.locateOnScreen(image_path)
+                box = gui.locateOnScreen(needle)
             except Exception:  # noqa: BLE001
                 box = None
             if box is None:

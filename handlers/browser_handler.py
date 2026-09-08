@@ -125,6 +125,20 @@ def _apply_automation_hiding(options) -> None:
     options.add_argument("--disable-blink-features=AutomationControlled")
 
 
+def _apply_download_prefs(options, download_dir: Path) -> None:
+    """起動オプション側でもダウンロード先フォルダを指定し、保存先確認ダイアログを
+    出さないようにする(通常のheaded実行向け。headless実行時はこれだけでは
+    不十分なため、起動後にCDPのPage.setDownloadBehaviorも別途呼んでいる)。
+    """
+    download_dir.mkdir(parents=True, exist_ok=True)
+    options.add_experimental_option("prefs", {
+        "download.default_directory": str(download_dir),
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "safebrowsing.enabled": True,
+    })
+
+
 def _hide_navigator_webdriver(driver) -> None:
     """JavaScriptから navigator.webdriver を調べて自動操作を検知するサイト向けに、
     その値をundefinedへ書き換える(新しいページに遷移するたびに再適用される)。
@@ -176,6 +190,9 @@ class BrowserHandler:
         self._tab_handles: dict[str, str] = {}       # alias -> window handle
         self._tab_site_urls: dict[str, str] = {}      # alias -> 現在そのタブで開いているサイトのURL
         self._current_tab_alias: str | None = None
+        # ダウンロード先フォルダ(_get_driver()で起動時に既定値を設定し、
+        # set_download_directoryで上書きできる)
+        self._download_dir: Path = self.whitelist_path.parent.parent / "workdir" / "downloads"
 
     # ---------- ホワイトリスト管理 ----------
 
@@ -216,6 +233,7 @@ class BrowserHandler:
                 options.add_argument("--no-sandbox")
                 options.add_argument("--disable-dev-shm-usage")
                 _apply_automation_hiding(options)
+                _apply_download_prefs(options, self._download_dir)
                 driver_path = os.environ.get("RPA_EDGE_DRIVER_PATH")
                 service = EdgeService(executable_path=driver_path) if driver_path else None
                 try:
@@ -232,6 +250,7 @@ class BrowserHandler:
                 options.add_argument("--no-sandbox")
                 options.add_argument("--disable-dev-shm-usage")
                 _apply_automation_hiding(options)
+                _apply_download_prefs(options, self._download_dir)
                 driver_path = os.environ.get("RPA_CHROME_DRIVER_PATH")
                 service = ChromeService(executable_path=driver_path) if driver_path else None
                 try:
@@ -239,7 +258,23 @@ class BrowserHandler:
                 except Exception as e:  # noqa: BLE001
                     raise _build_launch_error("Chrome", "chromedriver", "RPA_CHROME_DRIVER_PATH", e) from e
             _hide_navigator_webdriver(self._driver)
+            self._apply_download_behavior(self._download_dir)
         return self._driver
+
+    def _apply_download_behavior(self, download_dir: Path) -> None:
+        """CDP経由でダウンロード先フォルダを指定する。headless(バックグラウンド)
+        実行時、Chromeは既定でダウンロード自体をブロックするため、起動オプション
+        のprefsだけでは不十分で、これを毎回明示的に呼ぶ必要がある。
+        """
+        download_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self._driver.execute_cdp_cmd(
+                "Page.setDownloadBehavior",
+                {"behavior": "allow", "downloadPath": str(download_dir)},
+            )
+        except Exception:  # noqa: BLE001
+            pass  # CDP非対応の環境でも起動自体は継続できるようにする
+        self._download_dir = download_dir
 
     def _assert_domain_allowed(self, url: str, expected_url: str) -> None:
         got_domain = urlparse(url).netloc
@@ -431,6 +466,56 @@ class BrowserHandler:
             f"タイトルに '{title_hint}' を含むウィンドウが、今操作しているブラウザセッション内には"
             f"見つかりませんでした(Seleniumの制御が及ばない別プロセスのウィンドウの可能性があります。"
             f"その場合はこの手順ではなくデスクトップ操作で操作してください)"
+        )
+
+    # ---------- ファイルのダウンロード(SharePoint等の「ダウンロード」ボタン向け) ----------
+    # ダウンロード先は既定で workdir/downloads だが、set_download_directoryで
+    # 変更できる。headless(バックグラウンド)実行時はChrome側の仕様により
+    # ダウンロード自体が既定でブロックされるため、_get_driver()で起動のたびに
+    # CDP経由で明示的に許可している(このため、この2つのメソッドを呼ばなくても
+    # ダウンロードそのものは既定のフォルダへ行われる。保存先を変えたい場合や、
+    # ダウンロード完了を待ってファイルパスを確実に取得したい場合に使う)。
+
+    def set_download_directory(self, path: str) -> str:
+        """以降のダウンロードの保存先フォルダを指定する。"""
+        driver = self._get_driver()
+        out = Path(path)
+        self._apply_download_behavior(out)
+        logger.info("ダウンロード先フォルダを変更しました: %s", out)
+        return f"download directory: {out}"
+
+    def wait_for_download(self, filename_hint: str = "", timeout: float = 30) -> str:
+        """ダウンロード先フォルダ(既定は workdir/downloads。set_download_directory
+        で変更可能)に、新しいダウンロードファイルが現れて完了するまで待ち、
+        そのファイルパスを返す。filename_hintを指定すると、ファイル名にその
+        文字列を含むものだけを対象にする(部分一致。省略時は最新の1件)。
+        ダウンロード中はブラウザが拡張子に .crdownload/.tmp を付けるため、
+        それが外れて実ファイルになるまで待つ。
+        """
+        download_dir = self._download_dir
+        download_dir.mkdir(parents=True, exist_ok=True)
+        before = {p.name for p in download_dir.iterdir()}
+        deadline = time.monotonic() + timeout
+        while True:
+            candidates = [
+                p for p in download_dir.iterdir()
+                if p.name not in before
+                and not p.name.endswith(".crdownload")
+                and not p.name.endswith(".tmp")
+                and (filename_hint in p.name if filename_hint else True)
+            ]
+            if candidates:
+                candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                logger.info("ダウンロードの完了を確認しました: %s", candidates[0])
+                return str(candidates[0])
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.5)
+        raise ElementNotFoundError(
+            f"{timeout}秒待ってもダウンロードが完了したファイルが見つかりませんでした"
+            f"(保存先: {download_dir}"
+            + (f"、ファイル名に '{filename_hint}' を含むもの" if filename_hint else "")
+            + ")"
         )
 
     # ---------- フレーム(<frame>/<iframe>。3分割フレームページ等) ----------

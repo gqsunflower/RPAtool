@@ -1774,6 +1774,9 @@ class MacroRecorder:
             print("      「15) 別のウィンドウをアクティブにする」は画面の見た目を")
             print("      切り替えるだけで、クリック等の操作対象までは切り替わらない。")
             print("      同じセッション内で新規ウィンドウが開いた場合はこちらも必要)")
+            print("  21) ダウンロード先フォルダを指定する(既定はworkdir/downloads)")
+            print("  22) ダウンロードの完了を待つ(SharePoint等の「ダウンロード」")
+            print("      ボタン押下後、保存されたファイルのパスを取得する)")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -1818,10 +1821,54 @@ class MacroRecorder:
                 self._record_switch_to_parent_frame()
             elif choice == "20":
                 self._record_switch_to_window_by_title()
+            elif choice == "21":
+                self._record_set_download_directory()
+            elif choice == "22":
+                self._record_wait_for_download()
             elif choice == "0":
                 return
             else:
-                print("0〜20のいずれかを入力してください。\n")
+                print("0〜22のいずれかを入力してください。\n")
+
+    def _record_set_download_directory(self) -> None:
+        result = self._ask_sluttable_value("ダウンロード先フォルダのパス")
+        if result is None:
+            print("  → キャンセルしました。\n")
+            return
+        test_value, param_value = result
+        try:
+            result_msg = self.browser.set_download_directory(test_value)
+            print(f"  → 実際に設定できました: {result_msg}")
+            self.steps.append({
+                "handler": "browser", "action": "set_download_directory",
+                "params": {"path": param_value},
+            })
+            print("  → 登録しました。\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+
+    def _record_wait_for_download(self) -> None:
+        hint = self._ask("  ファイル名の一部で絞り込みますか?(空Enterで最新の1件): ").strip()
+        timeout_raw = self._ask("  最大何秒待ちますか?(空Enterで30秒): ").strip()
+        try:
+            timeout = float(timeout_raw) if timeout_raw else 30.0
+        except ValueError:
+            timeout = 30.0
+        try:
+            path = self.browser.wait_for_download(filename_hint=hint, timeout=timeout)
+            print(f"  → 実際にダウンロード完了を確認できました: {path}")
+            store_as = self._ask_store_as()
+            step = {
+                "handler": "browser", "action": "wait_for_download",
+                "params": {"filename_hint": hint, "timeout": timeout},
+            }
+            if store_as:
+                step["store_as"] = store_as
+                self.record_variable(store_as, path)
+            self.steps.append(step)
+            print("  → 登録しました。\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
 
     def _record_switch_to_window_by_title(self) -> None:
         print("  ※ デスクトップ操作の「ウィンドウをアクティブにする」は画面の見た目を")

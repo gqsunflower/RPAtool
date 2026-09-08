@@ -96,6 +96,7 @@ DOMAIN_ACTIONS = {
         "操作対象を別のブラウザウィンドウに切り替える",
         "フレーム一覧を見る", "フレームに切り替える", "元のページ(フレーム外)に戻る",
         "1段階だけ親フレームに戻る",
+        "ダウンロード先フォルダを指定する", "ダウンロードの完了を待つ",
     ],
     "explorer": [
         "パスを開く", "フォルダを作成する", "ファイルを移動する", "ファイルをコピーする",
@@ -2583,6 +2584,67 @@ class RecorderApp(_AppBase):
                     self.register_step({
                         "handler": "browser", "action": "switch_to_parent_frame", "params": {},
                     })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "ダウンロード先フォルダを指定する":
+            ttk.Label(
+                f, text="既定では workdir\\downloads に保存されます。SharePoint等の\n"
+                        "「ダウンロード」ボタンを押す前に、保存先を変えたい場合に使います。",
+                foreground="#557", justify="left",
+            ).pack(anchor="w", pady=(0, 6))
+            path_field = ValueSlotField(f, "ダウンロード先フォルダのパス")
+            path_field.add_button("参照...", path_field.browse_dir)
+            path_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                test_v, param_v, _ = path_field.get()
+                if not test_v:
+                    self.log("⚠ フォルダを指定してください")
+                    return
+                try:
+                    result_msg = self.recorder.browser.set_download_directory(test_v)
+                    self.log(f"→ 設定できました: {result_msg}")
+                    self.register_step({
+                        "handler": "browser", "action": "set_download_directory",
+                        "params": {"path": param_v},
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "ダウンロードの完了を待つ":
+            ttk.Label(
+                f, text="「クリックする」等でダウンロードボタンを押した直後に登録してください。\n"
+                        "SharePoint等からファイルをダウンロードし、後続の手順(Excelで開く等)で\n"
+                        "そのファイルを使いたい場合に、保存されたファイルのパスを取得できます。",
+                foreground="#557", justify="left",
+            ).pack(anchor="w", pady=(0, 6))
+            hint_field = PlainField(f, "ファイル名の一部で絞り込む(空欄で最新の1件)")
+            hint_field.pack(fill="x", pady=4)
+            timeout_field = PlainField(f, "最大待機秒数", default="30")
+            timeout_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                hint = hint_field.get().strip()
+                try:
+                    timeout = float(timeout_field.get() or "30")
+                except ValueError:
+                    timeout = 30.0
+                try:
+                    path = self.recorder.browser.wait_for_download(filename_hint=hint, timeout=timeout)
+                    self.log(f"→ ダウンロード完了を確認できました: {path}")
+                    store_as = self._ask_store_as()
+                    step = {
+                        "handler": "browser", "action": "wait_for_download",
+                        "params": {"filename_hint": hint, "timeout": timeout},
+                    }
+                    if store_as:
+                        step["store_as"] = store_as
+                    self.register_step(step, path)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
 
