@@ -72,7 +72,9 @@ class MacroRecorder:
     def __init__(self, config_dir: Path, browser: str = "chrome"):
         self.config_dir = Path(config_dir)
         self.browser = BrowserHandler(self.config_dir / "whitelist_urls.json", headless=False, browser=browser)
-        self.excel = ExcelHandler()
+        # 記録中はブラウザと同様、Excelも実際の画面を見ながら確認できるよう
+        # 可視化モード(COM経由でExcelアプリを起動)を既定にする。
+        self.excel = ExcelHandler(visible=True)
         self.pdf = PdfHandler()
         self.explorer = ExplorerHandler()
         self.process = ProcessHandler(self.config_dir / "exec_whitelist.json")
@@ -288,6 +290,8 @@ class MacroRecorder:
             print("  11) 保存せずに中止する")
             print("  12) 直前の操作を取り消す(操作を間違えた場合)")
             print("  13) 今の変数一覧を見る(記録時点で確認できた値)")
+            excel_mode = "表示する" if self.excel.visible else "表示しない(バックグラウンド)"
+            print(f"  14) Excelの表示設定を切り替える(今: {excel_mode})")
             choice = self._ask("番号> ")
             print()
 
@@ -314,14 +318,17 @@ class MacroRecorder:
             elif choice == "11":
                 if self._site_opened:
                     self.browser.close()
+                self.excel.close()
                 print("登録を中止しました(何も保存していません)。")
                 return None
             elif choice == "12":
                 self._undo_last_step(base_step_count)
             elif choice == "13":
                 self._print_variables()
+            elif choice == "14":
+                self._toggle_excel_visible()
             else:
-                print("1〜13のいずれかを入力してください。\n")
+                print("1〜14のいずれかを入力してください。\n")
 
     def _print_variables(self) -> None:
         if not self.variables:
@@ -334,6 +341,26 @@ class MacroRecorder:
                 preview = preview[:100] + "..."
             print(f"    {name} ({type(value).__name__}) = {preview}")
         print()
+
+    def _toggle_excel_visible(self) -> None:
+        """Excelを画面に表示して動作確認しながら記録するか、バックグラウンドで
+        記録するかを切り替える。何度も試して問題ないことを確認できたら、
+        バックグラウンドに切り替えて残りの記録を続けられる(登録される
+        手順の内容は変わらない。見た目が変わるだけ)。
+        """
+        new_visible = not self.excel.visible
+        if self.excel.list_open_workbooks():
+            answer = self._ask(
+                "今開いているExcelの保存していない変更は失われます。切り替えますか?"
+                " (y/n): "
+            )
+            if answer.strip().lower() not in ("y", "yes", "はい"):
+                print("  → 変更しませんでした。\n")
+                return
+        self.excel.close()
+        self.excel.set_visible(new_visible)
+        label = "表示する" if new_visible else "表示しない(バックグラウンド)"
+        print(f"  → Excelを{label}設定に切り替えました。\n")
 
     # ---------- 直前の操作の取り消し ----------
 
@@ -3963,6 +3990,7 @@ class MacroRecorder:
         if self._site_opened:
             self.browser.close()
             self.steps.append({"handler": "browser", "action": "close", "params": {}})
+        self.excel.close()
 
         print("最後に、このマクロの保存情報を教えてください。")
         macro_name = self._ask("保存時に使う名前(半角英数字。例: monthly_report)はどうしますか?: ")

@@ -495,6 +495,16 @@ class RecorderApp(_AppBase):
             (self.browser_combo, {"row": 0, "column": 5, "padx": 4}),
         )
 
+        # Excelを表示して実行するか(記録中の動作確認用。既定はON)。
+        # 何度も試して問題ないことを確認できたら、OFFにしてバックグラウンドで
+        # 記録を続けられる(見た目が変わるだけで、登録される手順は同じ)。
+        self.excel_visible_var = tk.BooleanVar(value=self.recorder.excel.visible)
+        excel_visible_check = ttk.Checkbutton(
+            top, text="Excelを表示して確認する", variable=self.excel_visible_var,
+            command=self._on_excel_visible_changed,
+        )
+        excel_visible_check.grid(row=0, column=6, sticky="w", padx=(16, 0))
+
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True)
 
@@ -629,6 +639,28 @@ class RecorderApp(_AppBase):
         )
         self.recorder._site_opened = False
         self.log(f"→ ブラウザを{label}に切り替えました")
+
+    def _on_excel_visible_changed(self) -> None:
+        new_visible = self.excel_visible_var.get()
+        if new_visible == self.recorder.excel.visible:
+            return
+
+        # 既にExcelが開いている場合、切り替えると保存していない変更が
+        # 失われるため、先に確認する(ブラウザ切り替えと同じ考え方)。
+        if self.recorder.excel.list_open_workbooks():
+            if not self._confirm(
+                "Excelの表示設定を切り替えます。今開いているExcelの保存していない"
+                "変更は失われます。よろしいですか?"
+            ):
+                self.excel_visible_var.set(self.recorder.excel.visible)
+                return
+        try:
+            self.recorder.excel.close()
+        except Exception:  # noqa: BLE001
+            pass
+        self.recorder.excel.set_visible(new_visible)
+        label = "表示する" if new_visible else "表示しない(バックグラウンド)"
+        self.log(f"→ Excelを{label}設定に切り替えました")
 
     # ---------- 共通ヘルパー ----------
 
@@ -4131,6 +4163,10 @@ class RecorderApp(_AppBase):
             if self.recorder._site_opened:
                 self.recorder.browser.close()
                 self.recorder.steps.append({"handler": "browser", "action": "close", "params": {}})
+            try:
+                self.recorder.excel.close()
+            except Exception:  # noqa: BLE001
+                pass
 
             macro_def = {
                 "description": description,
@@ -4158,6 +4194,10 @@ class RecorderApp(_AppBase):
         try:
             if self.recorder._site_opened:
                 self.recorder.browser.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.recorder.excel.close()
         except Exception:  # noqa: BLE001
             pass
         self.destroy()

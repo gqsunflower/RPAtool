@@ -115,7 +115,7 @@ class BrowserPool:
 
 def build_handlers(headless: bool, browser_pool: BrowserPool, browser: str = "chrome") -> dict:
     return {
-        "excel": ExcelHandler(),
+        "excel": ExcelHandler(visible=not headless),
         "pdf": PdfHandler(),
         "browser": browser_pool.get(browser),
         "explorer": ExplorerHandler(),
@@ -164,6 +164,10 @@ def run_macro_noninteractive(
         return False
     finally:
         browser_pool.close_all()
+        try:
+            executor.handlers["excel"].close()
+        except Exception:  # noqa: BLE001
+            pass
 
     print(f"マクロ '{macro_name}' が完了しました。")
     for r in results:
@@ -460,12 +464,14 @@ def _insert_step_interactive(
         print("  入力が正しくありません。挿入を中止しました。\n")
         if rec._site_opened:
             rec.browser.close()
+        rec.excel.close()
         return False
 
     domain_fn()  # このメニューは「0) 戻る」で抜けるまでループする(複数手順の追加も可)
 
     if rec._site_opened:
         rec.browser.close()
+    rec.excel.close()
 
     new_steps = rec.steps[before_count:]
     if not new_steps:
@@ -1022,29 +1028,32 @@ def health_check_menu(executor: MacroExecutor, browser: str = "chrome") -> None:
     run_health_check(CONFIG_DIR, headless=True, target=macro_name, browser=browser)
 
 
-def manage_execution_mode(browser_pool: BrowserPool) -> None:
-    """マクロ実行時にブラウザの画面を表示するか(バックグラウンド実行/
+def manage_execution_mode(browser_pool: BrowserPool, excel_handler: ExcelHandler) -> None:
+    """マクロ実行時にブラウザ・Excelの画面を表示するか(バックグラウンド実行/
     ソフトウェアを起動して目で見て確認しながら実行)を対話的に切り替える。
-    切り替えると、既に開いていたブラウザは一旦閉じ、次にマクロを実行する
+    切り替えると、既に開いていたブラウザ・Excelは一旦閉じ、次にマクロを実行する
     ときから新しい設定で開き直される(ステップ実行・パイプライン実行にも
-    共通して反映される)。
+    共通して反映される)。デスクトップ操作(画像検索によるクリック等)は対象外。
     """
     current = "バックグラウンド(画面を表示しない)" if browser_pool.headless else "ソフトウェアを起動して実行(画面を表示する)"
     print(f"今の設定: {current}")
     print("  1) バックグラウンドで実行する(画面を表示しない。既定。他の作業の邪魔にならない)")
-    print("  2) ソフトウェアを起動して実行する(ブラウザ等の画面を表示し、目で見て動作が正しいか確認できる)")
+    print("  2) ソフトウェアを起動して実行する(ブラウザ・Excel等の画面を表示し、目で見て動作が正しいか確認できる)")
     print("  0) 変更しない")
     choice = input("番号> ").strip()
     if choice == "1":
-        changed = browser_pool.set_headless(True)
+        headless = True
     elif choice == "2":
-        changed = browser_pool.set_headless(False)
+        headless = False
     else:
         print("  → 変更しませんでした。\n")
         return
-    if changed:
+    changed_browser = browser_pool.set_headless(headless)
+    excel_handler.close()
+    changed_excel = excel_handler.set_visible(not headless)
+    if changed_browser or changed_excel:
         print("  → 設定を変更しました(次にマクロを実行するときから反映されます。"
-              "既に開いていたブラウザは閉じました)。\n")
+              "既に開いていたブラウザ・Excelは閉じました)。\n")
     else:
         print("  → 既にその設定でした(変更なし)。\n")
 
@@ -1158,7 +1167,7 @@ def run_repl(dry_run: bool, headless: bool, browser: str = "chrome") -> None:
             continue
 
         if text in EXEC_MODE_TRIGGERS:
-            manage_execution_mode(browser_pool)
+            manage_execution_mode(browser_pool, executor.handlers["excel"])
             continue
 
         if text in EXPORT_TRIGGERS:
@@ -1195,6 +1204,7 @@ def run_repl(dry_run: bool, headless: bool, browser: str = "chrome") -> None:
             open_step_editor(CONFIG_DIR, match.macro, e.step_number)
             print("修正のため、プログラムを終了します。")
             browser_pool.close_all()
+            executor.handlers["excel"].close()
             return
         except Exception as e:  # noqa: BLE001
             logger.exception("マクロ実行中にエラーが発生しました")
@@ -1202,6 +1212,7 @@ def run_repl(dry_run: bool, headless: bool, browser: str = "chrome") -> None:
         print()
 
     browser_pool.close_all()
+    executor.handlers["excel"].close()
 
 
 def main() -> None:
