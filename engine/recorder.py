@@ -64,6 +64,43 @@ def _offset_template(var_name: str, offset: int) -> str:
     return "{{" + var_name + sign + str(abs(offset)) + "}}"
 
 
+def check_control_flow_integrity(steps: list[dict]) -> list[str]:
+    """制御構文(ラベル参照・for対応)の整合性を簡易チェックし、
+    問題があれば警告メッセージの一覧を返す(空なら問題なし)。
+    並び替え・削除・挿入の後に呼び、参考情報として表示する
+    (自動修正はしない。実行してみないと壊れているか分からない複雑な
+    ケースまでは検出できないため、あくまで簡易チェック)。
+    """
+    warnings: list[str] = []
+    labels = {
+        s["params"]["name"] for s in steps
+        if s.get("handler") == "control" and s.get("action") == "label"
+    }
+    for s in steps:
+        if s.get("handler") != "control":
+            continue
+        if s.get("action") in ("goto", "if_goto"):
+            label = s.get("params", {}).get("label")
+            if label not in labels:
+                warnings.append(f"'{label}' へのジャンプがありますが、そのラベルが見つかりません")
+
+    depth = 0
+    for s in steps:
+        if s.get("handler") != "control":
+            continue
+        if s.get("action") == "for_start":
+            depth += 1
+        elif s.get("action") == "for_end":
+            depth -= 1
+            if depth < 0:
+                warnings.append("対応する「繰り返しを開始する」より前に「繰り返しを終了する」があります")
+                depth = 0
+    if depth > 0:
+        warnings.append("対応する「繰り返しを終了する」が無い「繰り返しを開始する」があります")
+
+    return warnings
+
+
 class _ActionCancelled(Exception):
     """記録中の操作を、目印/パス入力の時点で取りやめたことを表す。"""
 
@@ -91,6 +128,10 @@ class MacroRecorder:
         self.required_slots: list[str] = []
         self._site_opened = False
         self._auto_var_counter = 0
+        # 既存マクロを読み込んで編集している場合、そのマクロ名(load_existing参照)。
+        # 新規作成の場合はNoneのまま。
+        self.loaded_macro_name: str | None = None
+        self._replay_warnings: list[str] = []
 
     def _next_auto_var(self, prefix: str) -> str:
         """最終行/最終列などを自動取得する際に使う、衝突しない変数名を発行する。"""
@@ -2502,19 +2543,11 @@ class MacroRecorder:
             print("  → この操作の記録をキャンセルしました。メニューに戻ります。\n")
             return
 
-        slot_name = self._ask(
-            "  この値は実行するたびに変わりますか?"
-            " 変わる場合はスロット名(例: order_no)を、固定値ならそのままEnter: "
-        )
-
-        if slot_name:
-            if slot_name not in self.required_slots:
-                self.required_slots.append(slot_name)
-            test_value = self._ask(f"  動作確認用に '{slot_name}' に実際入力する値を入力してください: ")
-            param_value = "{{" + slot_name + "}}"
-        else:
-            test_value = self._ask("  入力する固定値を入力してください: ")
-            param_value = test_value
+        result = self._ask_sluttable_value("入力する値")
+        if result is None:
+            print("  → この操作の記録をキャンセルしました。メニューに戻ります。\n")
+            return
+        test_value, param_value = result
 
         press_enter = self._ask("  入力したあと、Enterキーで送信しますか? (y/N): ").lower() == "y"
 
@@ -4045,3 +4078,87 @@ class MacroRecorder:
         data["intents"] = intents
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+    # ---------- 既存マクロを開いて編集する ----------
+
+    def list_saved_macro_names(self) -> list[str]:
+        """保存済みのマクロ名の一覧を取得する(既存マクロを開く機能で使用)。"""
+        path = self.config_dir / "macros.json"
+        if not path.exists():
+            return []
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return list(data.get("macros", {}).keys())
+
+    def _load_intent_meta(self, macro_name: str) -> tuple[str, list[str]]:
+        """intents.jsonから、指定マクロの説明文・呼び出しキーワードを取得する
+        (既存マクロを開いたときの保存ダイアログの初期値に使う)。
+        見つからない場合は空の説明・空リストを返す。
+        """
+        path = self.config_dir / "intents.json"
+        if not path.exists():
+            return "", []
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for intent in data.get("intents", []):
+            if intent.get("id") == macro_name:
+                return intent.get("description", ""), list(intent.get("keywords", []))
+        return "", []
+
+    def replay_state(self, steps_before: list[dict]) -> list[str]:
+        """既存の手順を編集・挿入する際、その時点までのブラウザ/Excelの状態を
+        ベストエフォートで再現する(最後に開かれていたサイト/ブックのみ)。
+        テンプレート({{ }})を含むパスは実際の値が分からないためスキップする。
+        戻り値: 再現中に発生した警告メッセージのリスト(表示は呼び出し側で行う)。
+        """
+        warnings: list[str] = []
+
+        last_site_key = None
+        for s in steps_before:
+            if s.get("handler") == "browser" and s.get("action") == "open_registered_site":
+                last_site_key = s.get("params", {}).get("site_key")
+        if last_site_key:
+            try:
+                self.browser.open_registered_site(last_site_key)
+                self._site_opened = True
+            except Exception as e:  # noqa: BLE001
+                warnings.append(
+                    f"サイトの再現に失敗しました(手動でサイトを開く操作から始めてください): {e}"
+                )
+
+        for s in steps_before:
+            if s.get("handler") != "excel":
+                continue
+            params = s.get("params", {})
+            try:
+                if s.get("action") == "load_workbook":
+                    path = params.get("path", "")
+                    if "{{" in str(path):
+                        continue
+                    self.excel.load_workbook(path, alias=params.get("alias"))
+                elif s.get("action") == "create_workbook":
+                    self.excel.create_workbook(alias=params.get("alias"))
+                elif s.get("action") == "switch_workbook":
+                    alias = params.get("alias")
+                    if alias in self.excel.list_open_workbooks():
+                        self.excel.switch_workbook(alias)
+            except Exception:  # noqa: BLE001
+                pass  # 再現できなくても致命的ではないため、そのまま先へ進む
+
+        return warnings
+
+    def load_existing(self, macro_name: str) -> dict:
+        """保存済みのマクロを読み込み、以降の編集(手順の追加・並び替え等)の
+        土台にする。ブラウザ/Excelの状態は、既存手順の最後の状態を
+        ベストエフォートで再現する(replay_state参照)。
+        戻り値: 読み込んだマクロの定義(description等の参照用)。
+        """
+        path = self.config_dir / "macros.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        macros = data.get("macros", {})
+        if macro_name not in macros:
+            raise KeyError(f"マクロが見つかりません: {macro_name}")
+        macro = macros[macro_name]
+        self.steps = list(macro.get("steps", []))
+        self.required_slots = list(macro.get("required_slots", []))
+        self.loaded_macro_name = macro_name
+        self._replay_warnings = self.replay_state(self.steps)
+        return macro

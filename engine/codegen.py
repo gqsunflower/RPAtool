@@ -25,7 +25,12 @@ PyInstallerでexe化したりしやすい単体スクリプトに落とし込む
 """
 from __future__ import annotations
 
+import importlib.util
+import subprocess
+import sys
 from pathlib import Path
+
+_PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 _UNSUPPORTED_CONTROL_ACTIONS = {"label", "goto", "if_goto", "for_start", "for_end"}
 
@@ -204,3 +209,34 @@ def generate_script(macro_name: str, macro_def: dict, output_path: Path) -> None
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def pyinstaller_available() -> bool:
+    return importlib.util.find_spec("PyInstaller") is not None
+
+
+def build_exe(script_path: Path) -> tuple[bool, str]:
+    """PyInstallerで.pyファイルを単体exeに変換する(--onefile)。
+    戻り値: (成功したか, 成功時はexeのパス・失敗時はエラーメッセージ)。
+    呼び出し元のUI(CLI/GUI)に依存しないよう、printは行わない。
+    """
+    if not pyinstaller_available():
+        return False, (
+            "PyInstallerがインストールされていません。"
+            "'pip install pyinstaller' を実行してから、もう一度お試しください。"
+        )
+
+    dist_dir = script_path.parent / "dist"
+    build_dir = script_path.parent / "build"
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "PyInstaller", "--onefile",
+            "--distpath", str(dist_dir), "--workpath", str(build_dir),
+            "--specpath", str(script_path.parent), str(script_path),
+        ],
+        cwd=_PROJECT_DIR,
+    )
+    if result.returncode != 0:
+        return False, "exe化に失敗しました(PyInstallerのログを確認してください)。"
+    exe_path = dist_dir / f"{script_path.stem}.exe"
+    return True, str(exe_path)

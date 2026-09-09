@@ -19,6 +19,7 @@ MacroRecorderが内部に持つExcel/PDF/Web/エクスプローラー/実行フ�
 """
 from __future__ import annotations
 
+import json
 import sys
 import time
 import tkinter as tk
@@ -34,7 +35,9 @@ _NO_VALUE = object()  # register_stepでvalue未指定を表す番人値(Noneも
 BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR))
 
-from engine.recorder import MacroRecorder  # noqa: E402
+from engine.codegen import UnsupportedMacroError, build_exe, generate_script  # noqa: E402
+from engine.executor import MacroExecutor  # noqa: E402
+from engine.recorder import MacroRecorder, check_control_flow_integrity  # noqa: E402
 from handlers.browser_handler import (  # noqa: E402
     PDF_PAPER_SIZES_INCHES,
     BrowserHandler,
@@ -52,6 +55,7 @@ except ImportError:
     DND_AVAILABLE = False
 
 CONFIG_DIR = BASE_DIR / "config"
+SCRIPTS_DIR = BASE_DIR / "generated_scripts"
 CLIP_IMAGE_DIR = BASE_DIR / "workdir" / "clip_images"
 
 DOMAIN_LABELS = {
@@ -262,11 +266,26 @@ class ValueSlotField(ttk.Frame):
             self.value_var.set(path)
 
     def get(self) -> tuple[str, str, str | None]:
-        """戻り値: (動作確認に使う実際の値, macros.jsonに書くparam値, スロット名 or None)"""
+        """戻り値: (動作確認に使う実際の値, macros.jsonに書くparam値, スロット名 or None)
+
+        入力欄に "{{変数名}}" ("{{listname[0]}}" のような、前の手順が
+        store_as で記録した変数を埋め込む書き方も含む)が含まれている場合は、
+        それをそのままテンプレートとして登録し、動作確認にはそのまま使えない
+        ため(その場では変数が解決されていないため)、別途「実際の値に
+        置き換えたもの」をダイアログで尋ねる。
+        """
         value = self.value_var.get()
         slot = self.slot_var.get().strip()
         if slot:
             return value, "{{" + slot + "}}", slot
+        if "{{" in value and "}}" in value:
+            test_value = simpledialog.askstring(
+                "動作確認用の値",
+                f"'{value}' は変数を埋め込むテンプレートとして登録されます。\n"
+                "動作確認用に、実際の値に置き換えたものを入力してください:",
+                parent=self,
+            )
+            return test_value or "", value, None
         return value, value, None
 
 
@@ -505,6 +524,19 @@ class RecorderApp(_AppBase):
         )
         excel_visible_check.grid(row=0, column=6, sticky="w", padx=(16, 0))
 
+        ttk.Button(
+            top, text="開く(既存マクロを編集)...", command=self._open_existing_macro,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.loaded_macro_label = ttk.Label(top, text="新規マクロを作成中", foreground="#557")
+        self.loaded_macro_label.grid(row=1, column=2, columnspan=5, sticky="w", pady=(8, 0))
+
+        ttk.Button(
+            top, text="テスト実行(ステップ実行)...", command=self._open_test_run_dialog,
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Button(
+            top, text="py/exe出力...", command=self._export_script_and_exe,
+        ).grid(row=2, column=3, columnspan=2, sticky="w", pady=(6, 0))
+
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True)
 
@@ -525,8 +557,14 @@ class RecorderApp(_AppBase):
 
         steps_frame = ttk.LabelFrame(left, text="記録済みの手順", padding=4)
         steps_frame.pack(fill="both", expand=True, pady=4)
-        self.steps_listbox = tk.Listbox(steps_frame)
-        self.steps_listbox.pack(fill="both", expand=True)
+        steps_row = ttk.Frame(steps_frame)
+        steps_row.pack(fill="both", expand=True)
+        self.steps_listbox = tk.Listbox(steps_row, exportselection=False)
+        self.steps_listbox.pack(side="left", fill="both", expand=True)
+        steps_move_col = ttk.Frame(steps_row)
+        steps_move_col.pack(side="left", fill="y", padx=(4, 0))
+        ttk.Button(steps_move_col, text="↑", width=3, command=self._move_step_up).pack(pady=(0, 2))
+        ttk.Button(steps_move_col, text="↓", width=3, command=self._move_step_down).pack()
 
         bottom = ttk.Frame(left)
         bottom.pack(fill="x", pady=(4, 0))
@@ -561,6 +599,29 @@ class RecorderApp(_AppBase):
             self.steps_listbox.insert(
                 "end", f"{i}. {step['handler']}.{step['action']}  {step.get('params', {})}"
             )
+
+    def _swap_steps(self, idx_a: int, idx_b: int, select: int) -> None:
+        steps = self.recorder.steps
+        steps[idx_a], steps[idx_b] = steps[idx_b], steps[idx_a]
+        self.refresh_steps()
+        self.steps_listbox.selection_set(select)
+        self.steps_listbox.see(select)
+        for w in check_control_flow_integrity(steps):
+            self.log(f"⚠ 制御構文の整合性チェック: {w}")
+
+    def _move_step_up(self) -> None:
+        sel = self.steps_listbox.curselection()
+        if not sel or sel[0] == 0:
+            return
+        idx = sel[0]
+        self._swap_steps(idx - 1, idx, select=idx - 1)
+
+    def _move_step_down(self) -> None:
+        sel = self.steps_listbox.curselection()
+        if not sel or sel[0] >= len(self.recorder.steps) - 1:
+            return
+        idx = sel[0]
+        self._swap_steps(idx, idx + 1, select=idx + 1)
 
     def register_step(self, step: dict, value: Any = _NO_VALUE) -> None:
         """手順を登録する。value を渡すと(store_asが設定されている場合)、
@@ -661,6 +722,311 @@ class RecorderApp(_AppBase):
         self.recorder.excel.set_visible(new_visible)
         label = "表示する" if new_visible else "表示しない(バックグラウンド)"
         self.log(f"→ Excelを{label}設定に切り替えました")
+
+    # ---------- 既存マクロを開く ----------
+
+    def _open_existing_macro(self) -> None:
+        names = self.recorder.list_saved_macro_names()
+        if not names:
+            messagebox.showinfo("既存マクロを開く", "保存済みのマクロがありません。")
+            return
+        if self.recorder.steps:
+            if not self._confirm(
+                "今記録中の手順はまだ保存されていません。既存マクロを開くと、"
+                "この内容は失われます。よろしいですか?"
+            ):
+                return
+
+        win = tk.Toplevel(self)
+        win.title("既存マクロを開く")
+        win.grab_set()
+        ttk.Label(win, text="編集するマクロを選んでください:").pack(anchor="w", padx=10, pady=(10, 4))
+        listbox = tk.Listbox(win, width=50, height=min(15, len(names) + 1))
+        for name in names:
+            listbox.insert("end", name)
+        listbox.pack(padx=10, pady=(0, 6), fill="both", expand=True)
+
+        def do_open():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            macro_name = names[sel[0]]
+            win.destroy()
+            self._load_macro_for_edit(macro_name)
+
+        ttk.Button(win, text="開く", command=do_open).pack(pady=(0, 10))
+
+    def _load_macro_for_edit(self, macro_name: str) -> None:
+        try:
+            if self.recorder._site_opened:
+                self.recorder.browser.close()
+                self.recorder._site_opened = False
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.recorder.excel.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            macro = self.recorder.load_existing(macro_name)
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror("読み込みエラー", f"マクロの読み込みに失敗しました: {e}")
+            return
+
+        for w in getattr(self.recorder, "_replay_warnings", []):
+            self.log(f"⚠ {w}")
+
+        self.base_step_count = len(self.recorder.steps)
+        self.recorder.variables = {}
+        self.refresh_steps()
+        self.refresh_variables()
+        self.loaded_macro_label.config(
+            text=f"編集中: {macro_name}({macro.get('description', '')})"
+        )
+        self.log(f"→ マクロ '{macro_name}' を読み込みました({len(self.recorder.steps)}手順)")
+
+    # ---------- テスト実行(F8風のステップ実行) ----------
+
+    def _open_test_run_dialog(self) -> None:
+        total = len(self.recorder.steps)
+        if total == 0:
+            messagebox.showinfo("テスト実行", "まだ手順が記録されていません。")
+            return
+
+        win = tk.Toplevel(self)
+        win.title("テスト実行")
+        win.grab_set()
+        ttk.Label(win, text=f"全{total}ステップです。").pack(anchor="w", padx=10, pady=(10, 4))
+        ttk.Label(win, text="開始ステップ(省略時は1):").pack(anchor="w", padx=10)
+        start_var = tk.StringVar(value="1")
+        ttk.Entry(win, textvariable=start_var, width=10).pack(anchor="w", padx=10)
+        ttk.Label(win, text=f"終了ステップ(省略時は最後まで。指定するとその直前で自動停止。1〜{total}):").pack(
+            anchor="w", padx=10, pady=(6, 0)
+        )
+        end_var = tk.StringVar(value="")
+        ttk.Entry(win, textvariable=end_var, width=10).pack(anchor="w", padx=10)
+        ttk.Label(
+            win,
+            text="実行中は1ステップごとに「実行/連続実行/スキップ/中止」を選べます"
+            "(VBAのF8相当)。今記録中の手順(未保存でも可)がそのまま対象です。",
+            foreground="#557", wraplength=320, justify="left",
+        ).pack(anchor="w", padx=10, pady=(8, 0))
+
+        def do_start():
+            try:
+                start_step = int(start_var.get().strip() or "1")
+            except ValueError:
+                messagebox.showwarning("入力エラー", "開始ステップは数値で入力してください")
+                return
+            end_raw = end_var.get().strip()
+            end_step = None
+            if end_raw:
+                try:
+                    end_step = int(end_raw)
+                except ValueError:
+                    messagebox.showwarning("入力エラー", "終了ステップは数値で入力してください")
+                    return
+            win.destroy()
+            self._run_test_execution(start_step, end_step)
+
+        ttk.Button(win, text="実行開始", command=do_start).pack(pady=10)
+
+    def _ask_slot_values(self, slot_names: list[str]) -> dict | None:
+        """required_slotsの値を1つのダイアログでまとめて尋ねる。
+        キャンセルされた場合はNoneを返す。JSON形式で書けばdict/listも渡せる
+        (CLI版のprompt_for_slotと同じ考え方)。
+        """
+        if not slot_names:
+            return {}
+        win = tk.Toplevel(self)
+        win.title("スロットの値を入力")
+        win.grab_set()
+        ttk.Label(
+            win, text="このマクロが必要とするスロットの値を入力してください"
+            "(JSON形式で書けばdict/listも可):",
+        ).pack(anchor="w", padx=10, pady=(10, 6))
+        entries: dict[str, tk.StringVar] = {}
+        for name in slot_names:
+            ttk.Label(win, text=name).pack(anchor="w", padx=10)
+            var = tk.StringVar()
+            ttk.Entry(win, textvariable=var, width=40).pack(padx=10, pady=(0, 4))
+            entries[name] = var
+
+        result: dict[str, Any] = {}
+        cancelled = {"value": True}
+
+        def do_ok():
+            cancelled["value"] = False
+            win.destroy()
+
+        ttk.Button(win, text="OK", command=do_ok).pack(pady=10)
+        win.wait_window()
+
+        if cancelled["value"]:
+            return None
+        for name, var in entries.items():
+            raw = var.get()
+            try:
+                result[name] = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                result[name] = raw
+        return result
+
+    def _run_test_execution(self, start_step: int, end_step: int | None) -> None:
+        slot_names = list(self.recorder.required_slots)
+        slots = self._ask_slot_values(slot_names)
+        if slots is None:
+            self.log("→ テスト実行をキャンセルしました。")
+            return
+
+        macro_def = {
+            "description": "",
+            "required_slots": self.recorder.required_slots,
+            "steps": self.recorder.steps,
+        }
+        handlers = {
+            "excel": self.recorder.excel,
+            "pdf": self.recorder.pdf,
+            "browser": self.recorder.browser,
+            "explorer": self.recorder.explorer,
+            "process": self.recorder.process,
+            "desktop": self.recorder.desktop,
+            "text": self.recorder.text,
+            "list": self.recorder.list,
+        }
+        executor = MacroExecutor(self.recorder.config_dir / "macros.json", handlers)
+        test_key = "__gui_test_run__"
+        executor.macros[test_key] = macro_def
+
+        self.log(f"→ テスト実行を開始します(ステップ{start_step}から"
+                  f"{'最後まで' if end_step is None else f'{end_step}の直前まで'})")
+        try:
+            results = executor.run(
+                test_key, slots, dry_run=False,
+                start_step=start_step, end_step=end_step,
+                on_step=self._gui_on_step, on_result=self._gui_on_result,
+                on_failure=self._gui_on_failure,
+            )
+        except Exception as e:  # noqa: BLE001
+            self.log(f"⚠ テスト実行中にエラーが発生しました: {e}")
+            return
+        self.log(f"→ テスト実行が終わりました({len(results)}件実行)。")
+
+    def _gui_on_step(self, step_number: int, total: int, step: dict) -> str:
+        decision = {"value": "abort"}
+        win = tk.Toplevel(self)
+        win.title(f"ステップ {step_number}/{total}")
+        win.grab_set()
+        ttk.Label(win, text=f"次のステップ({step_number}/{total}):").pack(
+            anchor="w", padx=10, pady=(10, 2)
+        )
+        ttk.Label(
+            win, text=f"{step['handler']}.{step['action']}\n{step.get('params', {})}",
+            wraplength=380, justify="left",
+        ).pack(anchor="w", padx=10, pady=(0, 10))
+
+        def choose(value: str) -> None:
+            decision["value"] = value
+            win.destroy()
+
+        btns = ttk.Frame(win)
+        btns.pack(pady=(0, 10))
+        ttk.Button(btns, text="実行(F8)", command=lambda: choose("step")).pack(side="left", padx=4)
+        ttk.Button(btns, text="連続実行", command=lambda: choose("run")).pack(side="left", padx=4)
+        ttk.Button(btns, text="スキップ", command=lambda: choose("skip")).pack(side="left", padx=4)
+        ttk.Button(btns, text="中止", command=lambda: choose("abort")).pack(side="left", padx=4)
+        win.bind("<Return>", lambda e: choose("step"))
+        win.protocol("WM_DELETE_WINDOW", lambda: choose("abort"))
+        win.wait_window()
+        return decision["value"]
+
+    def _gui_on_result(self, step_number: int, total: int, step: dict, result: Any) -> None:
+        self.log(f"  [{step_number}/{total}] 実行結果: {result}")
+
+    def _gui_on_failure(self, step_number: int, total: int, step: dict, error: Exception) -> str:
+        decision = {"value": "abort"}
+        win = tk.Toplevel(self)
+        win.title(f"ステップ {step_number} が失敗しました")
+        win.grab_set()
+        ttk.Label(
+            win, text=f"ステップ {step_number}/{total}"
+            f"({step['handler']}.{step['action']}) が失敗しました:",
+        ).pack(anchor="w", padx=10, pady=(10, 2))
+        ttk.Label(win, text=str(error), wraplength=380, foreground="#a33", justify="left").pack(
+            anchor="w", padx=10, pady=(0, 10)
+        )
+
+        def choose(value: str) -> None:
+            decision["value"] = value
+            win.destroy()
+
+        btns = ttk.Frame(win)
+        btns.pack(pady=(0, 10))
+        ttk.Button(btns, text="中止", command=lambda: choose("abort")).pack(side="left", padx=4)
+        ttk.Button(
+            btns, text="手動で対応済み(続行)", command=lambda: choose("resume"),
+        ).pack(side="left", padx=4)
+
+        def do_edit():
+            choose("abort")
+            self.steps_listbox.selection_clear(0, "end")
+            self.steps_listbox.selection_set(step_number - 1)
+            self.steps_listbox.see(step_number - 1)
+            self.log(f"  → ステップ{step_number}を選択しました。手順の一覧から確認・修正してください。")
+
+        ttk.Button(btns, text="中止して手順を確認", command=do_edit).pack(side="left", padx=4)
+        win.protocol("WM_DELETE_WINDOW", lambda: choose("abort"))
+        win.wait_window()
+        return decision["value"]
+
+    # ---------- py/exe出力 ----------
+
+    def _export_script_and_exe(self) -> None:
+        if not self.recorder.steps:
+            messagebox.showinfo("py/exe出力", "まだ手順が記録されていません。")
+            return
+
+        macro_def = {
+            "description": "",
+            "required_slots": self.recorder.required_slots,
+            "steps": self.recorder.steps,
+        }
+        if any(s.get("handler") == "browser" for s in self.recorder.steps):
+            macro_def["browser"] = self.recorder.browser.browser
+
+        default_name = self.recorder.loaded_macro_name or ""
+        script_name = simpledialog.askstring(
+            "py/exe出力", "スクリプト名(半角英数字。例: monthly_report)を入力してください:",
+            initialvalue=default_name, parent=self,
+        )
+        if not script_name:
+            self.log("→ py/exe出力をキャンセルしました。")
+            return
+
+        try:
+            SCRIPTS_DIR.mkdir(exist_ok=True)
+            script_path = SCRIPTS_DIR / f"{script_name}.py"
+            generate_script(script_name, macro_def, script_path)
+        except UnsupportedMacroError as e:
+            messagebox.showwarning("変換できません", str(e))
+            return
+        except Exception as e:  # noqa: BLE001
+            self.log(f"⚠ スクリプトの生成に失敗しました: {e}")
+            return
+
+        self.log(f"→ スクリプトを生成しました: {script_path}")
+        self.log("  (このスクリプトはプロジェクトのフォルダ内に置いたまま実行してください)")
+
+        if not messagebox.askyesno("exe化", "続けてexe化しますか?(PyInstallerが必要です)"):
+            return
+        self.log("→ PyInstallerでexe化します(少し時間がかかります)...")
+        self.update_idletasks()
+        ok, message = build_exe(script_path)
+        if ok:
+            self.log(f"→ 完成しました: {message}")
+        else:
+            self.log(f"⚠ {message}")
 
     # ---------- 共通ヘルパー ----------
 
@@ -4139,17 +4505,28 @@ class RecorderApp(_AppBase):
             messagebox.showinfo("保存できません", "まだ何も記録されていません。")
             return
 
+        loaded_name = self.recorder.loaded_macro_name
+        if loaded_name:
+            existing_desc, existing_keywords = self.recorder._load_intent_meta(loaded_name)
+        else:
+            existing_desc, existing_keywords = "", []
+
         win = tk.Toplevel(self)
         win.title("保存")
         win.grab_set()
+        if loaded_name:
+            ttk.Label(
+                win, text=f"'{loaded_name}' を編集中です。同じ名前のまま保存すると上書きされます。",
+                foreground="#557",
+            ).pack(anchor="w", padx=10, pady=(10, 0))
         ttk.Label(win, text="保存時に使う名前(半角英数字):").pack(anchor="w", padx=10, pady=(10, 0))
-        name_var = tk.StringVar()
+        name_var = tk.StringVar(value=loaded_name or "")
         ttk.Entry(win, textvariable=name_var, width=40).pack(padx=10)
         ttk.Label(win, text="このマクロの説明:").pack(anchor="w", padx=10, pady=(10, 0))
-        desc_var = tk.StringVar()
+        desc_var = tk.StringVar(value=existing_desc)
         ttk.Entry(win, textvariable=desc_var, width=40).pack(padx=10)
         ttk.Label(win, text="呼び出しキーワード(カンマ区切り):").pack(anchor="w", padx=10, pady=(10, 0))
-        kw_var = tk.StringVar()
+        kw_var = tk.StringVar(value=", ".join(existing_keywords))
         ttk.Entry(win, textvariable=kw_var, width=40).pack(padx=10)
 
         def do_save():

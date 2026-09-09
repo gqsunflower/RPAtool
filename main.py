@@ -40,12 +40,12 @@ from datetime import datetime
 from pathlib import Path
 
 from engine.backup import backup_file
-from engine.codegen import UnsupportedMacroError, generate_script
+from engine.codegen import UnsupportedMacroError, build_exe, generate_script
 from engine.executor import MacroEditRequested, MacroExecutor
 from engine.health_check import HealthChecker
 from engine.intent_engine import IntentEngine
 from engine.pipeline import PipelineRunner
-from engine.recorder import MacroRecorder
+from engine.recorder import MacroRecorder, check_control_flow_integrity
 from engine.run_logger import RunLogger
 from handlers.browser_handler import BrowserHandler
 from handlers.desktop_handler import DesktopHandler
@@ -351,45 +351,8 @@ def manage_retry(config_dir: Path) -> None:
 
 # ---------- 手順編集(並び替え・削除・挿入) ----------
 
-def _check_control_flow_integrity(steps: list[dict]) -> list[str]:
-    """制御構文(ラベル参照・for対応)の整合性を簡易チェックし、
-    問題があれば警告メッセージの一覧を返す(空なら問題なし)。
-    並び替え・削除・挿入の後に呼び、参考情報として表示する
-    (自動修正はしない。実行してみないと壊れているか分からない複雑な
-    ケースまでは検出できないため、あくまで簡易チェック)。
-    """
-    warnings: list[str] = []
-    labels = {
-        s["params"]["name"] for s in steps
-        if s.get("handler") == "control" and s.get("action") == "label"
-    }
-    for s in steps:
-        if s.get("handler") != "control":
-            continue
-        if s.get("action") in ("goto", "if_goto"):
-            label = s.get("params", {}).get("label")
-            if label not in labels:
-                warnings.append(f"'{label}' へのジャンプがありますが、そのラベルが見つかりません")
-
-    depth = 0
-    for s in steps:
-        if s.get("handler") != "control":
-            continue
-        if s.get("action") == "for_start":
-            depth += 1
-        elif s.get("action") == "for_end":
-            depth -= 1
-            if depth < 0:
-                warnings.append("対応する「繰り返しを開始する」より前に「繰り返しを終了する」があります")
-                depth = 0
-    if depth > 0:
-        warnings.append("対応する「繰り返しを終了する」が無い「繰り返しを開始する」があります")
-
-    return warnings
-
-
 def _print_control_flow_warnings(steps: list[dict]) -> None:
-    warnings = _check_control_flow_integrity(steps)
+    warnings = check_control_flow_integrity(steps)
     for w in warnings:
         print(f"  ⚠ 制御構文の整合性チェック: {w}")
 
@@ -413,40 +376,12 @@ def _insert_step_interactive(
     rec.steps = list(existing_steps)  # 既存の手順をそのまま引き継ぐ(末尾に追加される)
     rec.required_slots = list(macro.get("required_slots", []))
 
-    # 既にWebサイトを開く手順があれば、挿入作業中もその状態を再現しておく
-    # (ベストエフォート: 最後に開かれていたサイトだけを開き直す)
-    last_site_key = None
-    for s in existing_steps[:insert_before]:
-        if s.get("handler") == "browser" and s.get("action") == "open_registered_site":
-            last_site_key = s.get("params", {}).get("site_key")
-    if last_site_key:
-        try:
-            rec.browser.open_registered_site(last_site_key)
-            rec._site_opened = True
-            print(f"  (挿入作業のため、参考にサイト '{last_site_key}' を開き直しました)")
-        except Exception as e:  # noqa: BLE001
-            print(f"  ⚠ サイトの再現に失敗しました(手動でサイトを開く操作から始めてください): {e}")
-
-    # 同様に、Excelのブックを開く/切り替える手順があればベストエフォートで再現する
-    # (テンプレート({{ }})を含むパスは実際の値が分からないためスキップする)
-    for s in existing_steps[:insert_before]:
-        if s.get("handler") != "excel":
-            continue
-        params = s.get("params", {})
-        try:
-            if s.get("action") == "load_workbook":
-                path = params.get("path", "")
-                if "{{" in str(path):
-                    continue
-                rec.excel.load_workbook(path, alias=params.get("alias"))
-            elif s.get("action") == "create_workbook":
-                rec.excel.create_workbook(alias=params.get("alias"))
-            elif s.get("action") == "switch_workbook":
-                alias = params.get("alias")
-                if alias in rec.excel.list_open_workbooks():
-                    rec.excel.switch_workbook(alias)
-        except Exception:  # noqa: BLE001
-            pass  # 再現できなくても致命的ではないため、そのまま先へ進む
+    # 挿入作業中も、その時点までのブラウザ/Excelの状態をベストエフォートで
+    # 再現しておく(最後に開かれていたサイト/ブックのみ)。
+    for w in rec.replay_state(existing_steps[:insert_before]):
+        print(f"  ⚠ {w}")
+    if rec._site_opened:
+        print("  (挿入作業のため、参考にサイトを開き直しました)")
 
     before_count = len(rec.steps)
 
@@ -784,40 +719,16 @@ def export_run_log(executor: MacroExecutor) -> None:
 # 生成したスクリプトは engine/codegen.py の実装により、For/If/Gotoの
 # ような制御構文を含まない一直線のマクロのみに対応している。
 
-def _pyinstaller_available() -> bool:
-    import importlib.util
-    return importlib.util.find_spec("PyInstaller") is not None
-
-
 def convert_script_to_exe(script_path: Path) -> bool:
     """PyInstallerで.pyファイルを単体exeに変換する(--onefile)。
     戻り値: 成功したか。
     """
-    import subprocess
-
-    if not _pyinstaller_available():
-        print(
-            "  ⚠ PyInstallerがインストールされていません。"
-            "'pip install pyinstaller' を実行してから、もう一度お試しください。\n"
-        )
-        return False
-
-    dist_dir = script_path.parent / "dist"
-    build_dir = script_path.parent / "build"
     print(f"  PyInstallerでexe化します(少し時間がかかります): {script_path.name}")
-    result = subprocess.run(
-        [
-            sys.executable, "-m", "PyInstaller", "--onefile",
-            "--distpath", str(dist_dir), "--workpath", str(build_dir),
-            "--specpath", str(script_path.parent), str(script_path),
-        ],
-        cwd=BASE_DIR,
-    )
-    if result.returncode != 0:
-        print("  ⚠ exe化に失敗しました。上記のログを確認してください。\n")
+    ok, message = build_exe(script_path)
+    if not ok:
+        print(f"  ⚠ {message}\n")
         return False
-    exe_path = dist_dir / f"{script_path.stem}.exe"
-    print(f"  → 完成しました: {exe_path}\n")
+    print(f"  → 完成しました: {message}\n")
     return True
 
 

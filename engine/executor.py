@@ -37,6 +37,9 @@ MacroExecutor: config/macros.json に登録された「操作手順(マクロ)�
   その場で確認したい場合に、成功のたびに呼び出されます。
 
 start_step で指定した番号のステップから実行を開始できます。
+end_step を指定すると、そのステップの直前で自動的に実行を停止します
+(end_step自体は実行されません)。on_step の "run"(以降自動実行)を選んだ
+後でも、end_stepの境界だけは必ず守られます(F8の「特定行まで実行」相当)。
 
 前の手順の結果を後の手順で使う(store_as / 変数):
   ステップに {"store_as": "変数名"} を付けておくと、その手順の実行結果が
@@ -163,7 +166,9 @@ def _parse_var_expr(expr: str, slots: dict) -> Any:
     - "name[0]" / "name[i]"  リストの要素をPythonと同じ0始まりで取得する
       (角括弧の中は数字そのままか、他の変数名のどちらでも良い。
       後者の場合はその変数の値を整数のインデックスとして使う。forループの
-      カウンタ変数をそのままインデックスに使いたい場合等)
+      カウンタ変数をそのままインデックスに使いたい場合等)。取得した要素が
+      None(Excelの空白セル等)や空白文字だけの場合は、空文字列 "" として返す
+      (そのまま渡すと後続の手順で "None" という文字列になってしまうため)。
     - "name.length"   リストの要素数を取得する
     """
     expr = expr.strip()
@@ -207,7 +212,13 @@ def _parse_var_expr(expr: str, slots: dict) -> Any:
             raise IndexError(
                 f"'{key}' の範囲外のインデックスです: {idx}(要素数{len(lst)}、0〜{len(lst) - 1}の範囲で指定)"
             )
-        return lst[idx]
+        item = lst[idx]
+        # Excelの空白セル(None)や空白文字だけの値は、後続の手順(Web入力等)に
+        # そのまま渡すと "None" という文字列や意図しない値になってしまうため、
+        # 空文字として扱う。
+        if item is None or (isinstance(item, str) and item.strip() == ""):
+            return ""
+        return item
 
     m = _RE_ARITH.match(expr)
     if m:
@@ -377,6 +388,7 @@ class MacroExecutor:
         slots: dict,
         dry_run: bool = False,
         start_step: int = 1,
+        end_step: int | None = None,
         on_step: Callable[[int, int, dict], str] | None = None,
         on_result: Callable[[int, int, dict, Any], None] | None = None,
         on_failure: Callable[[int, int, dict, Exception], str] | None = None,
@@ -391,6 +403,14 @@ class MacroExecutor:
 
         if not (1 <= start_step <= max(total, 1)):
             raise ValueError(f"start_stepが範囲外です(1〜{total}): {start_step}")
+        if end_step is not None:
+            if not (1 <= end_step <= total):
+                raise ValueError(f"end_stepが範囲外です(1〜{total}): {end_step}")
+            if end_step <= start_step:
+                raise ValueError(
+                    f"end_step({end_step})はstart_step({start_step})より大きくしてください"
+                    "(end_step自体は実行されないため、start_stepと同じだと1つも実行されません)"
+                )
 
         # 制御構文(label/for)の事前スキャン: ラベル名->ステップ番号、
         # for_start<->for_endの対応関係をあらかじめ調べておく
@@ -427,6 +447,11 @@ class MacroExecutor:
         i = start_step
 
         while i <= total:
+            if end_step is not None and i >= end_step:
+                # end_stepの直前で自動停止(on_stepの"run"で自動実行に切り替わって
+                # いても、この境界だけは必ず守る)。end_step自体は実行しない。
+                logger.info("step %d/%d: end_step(%d)の直前のため停止しました", i, total, end_step)
+                break
             step = steps[i - 1]
             handler_name = step["handler"]
             action_name = step["action"]
