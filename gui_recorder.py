@@ -36,7 +36,7 @@ BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR))
 
 from engine.codegen import UnsupportedMacroError, build_exe, generate_script  # noqa: E402
-from engine.executor import MacroExecutor  # noqa: E402
+from engine.executor import MacroExecutor, _substitute  # noqa: E402
 from engine.recorder import MacroRecorder, check_control_flow_integrity  # noqa: E402
 from handlers.browser_handler import (  # noqa: E402
     PDF_PAPER_SIZES_INCHES,
@@ -270,22 +270,31 @@ class ValueSlotField(ttk.Frame):
 
         入力欄に "{{変数名}}" ("{{listname[0]}}" のような、前の手順が
         store_as で記録した変数を埋め込む書き方も含む)が含まれている場合は、
-        それをそのままテンプレートとして登録し、動作確認にはそのまま使えない
-        ため(その場では変数が解決されていないため)、別途「実際の値に
-        置き換えたもの」をダイアログで尋ねる。
+        それをそのままテンプレートとしてparamに登録しつつ、動作確認には
+        今の記録セッションで実際に確認できている変数の値(RecorderAppの
+        recorder.variables)を使って自動的に解決した値を使う。For文の
+        カウンタ("{{i}}"等)のようにまだ値が確定していない場合や、
+        未対応の書き方の場合だけ、実際の値をダイアログで尋ねる。
         """
         value = self.value_var.get()
         slot = self.slot_var.get().strip()
         if slot:
             return value, "{{" + slot + "}}", slot
         if "{{" in value and "}}" in value:
-            test_value = simpledialog.askstring(
-                "動作確認用の値",
-                f"'{value}' は変数を埋め込むテンプレートとして登録されます。\n"
-                "動作確認用に、実際の値に置き換えたものを入力してください:",
-                parent=self,
-            )
-            return test_value or "", value, None
+            app = self.winfo_toplevel()
+            variables = getattr(getattr(app, "recorder", None), "variables", {}) or {}
+            try:
+                resolved = _substitute(value, variables)
+            except (KeyError, ValueError, IndexError) as e:
+                test_value = simpledialog.askstring(
+                    "動作確認用の値",
+                    f"'{value}' の中の変数を、記録済みの値からは自動的に解決できません"
+                    f"でした({e})。\n動作確認用に、実際の値に置き換えたものを"
+                    "入力してください:",
+                    parent=self,
+                )
+                return test_value or "", value, None
+            return str(resolved), value, None
         return value, value, None
 
 
@@ -458,6 +467,7 @@ class RecorderApp(_AppBase):
         super().__init__()
         self.title("疑似ローカルAI — 操作の登録 (GUI)")
         self.geometry("1140x760")
+        self.minsize(900, 500)
 
         self.recorder = MacroRecorder(CONFIG_DIR, browser=browser)
         self.base_step_count = 0
@@ -503,6 +513,7 @@ class RecorderApp(_AppBase):
         # ブラウザ選択はWeb領域を選んでいるときだけ表示する(Excel等では無関係なため)
         self.browser_label = ttk.Label(top, text="ブラウザ:")
         browser_labels = {"chrome": "Chrome", "edge": "Edge"}
+        self._browser_key_to_label = browser_labels
         self._browser_label_to_key = {v: k for k, v in browser_labels.items()}
         self.browser_combo = ttk.Combobox(
             top, state="readonly", width=10, values=list(browser_labels.values()),
@@ -547,6 +558,16 @@ class RecorderApp(_AppBase):
         right.pack(side="right", fill="y", padx=(4, 8), pady=4)
         right.pack_propagate(False)
 
+        # 「保存して終了」等のボタンは、入力欄が多い操作(セル書き込みの
+        # 複数行入力等)でウィンドウの表示領域からあふれても必ず押せるよう、
+        # 先にside="bottom"で確保しておく(他の領域が窮屈になっても
+        # ここだけは画面下端に固定表示される)。
+        bottom = ttk.Frame(left)
+        bottom.pack(side="bottom", fill="x", pady=(4, 0))
+        ttk.Button(bottom, text="元に戻す(直前の操作を取り消す)", command=self._undo).pack(side="left")
+        ttk.Button(bottom, text="保存して終了", command=self._finish).pack(side="right")
+        ttk.Button(bottom, text="中止(保存しない)", command=self._cancel_all).pack(side="right", padx=6)
+
         self.form_frame = ttk.LabelFrame(left, text="入力", padding=10)
         self.form_frame.pack(fill="x")
 
@@ -565,12 +586,6 @@ class RecorderApp(_AppBase):
         steps_move_col.pack(side="left", fill="y", padx=(4, 0))
         ttk.Button(steps_move_col, text="↑", width=3, command=self._move_step_up).pack(pady=(0, 2))
         ttk.Button(steps_move_col, text="↓", width=3, command=self._move_step_down).pack()
-
-        bottom = ttk.Frame(left)
-        bottom.pack(fill="x", pady=(4, 0))
-        ttk.Button(bottom, text="元に戻す(直前の操作を取り消す)", command=self._undo).pack(side="left")
-        ttk.Button(bottom, text="保存して終了", command=self._finish).pack(side="right")
-        ttk.Button(bottom, text="中止(保存しない)", command=self._cancel_all).pack(side="right", padx=6)
 
         var_frame = ttk.LabelFrame(right, text="変数一覧(記録時点の値)", padding=4)
         var_frame.pack(fill="both", expand=True)
@@ -776,6 +791,14 @@ class RecorderApp(_AppBase):
 
         for w in getattr(self.recorder, "_replay_warnings", []):
             self.log(f"⚠ {w}")
+
+        # load_existing側でこのマクロを記録したブラウザ(chrome/edge)に
+        # 自動で切り替わっている場合があるため、プルダウンの表示も合わせる。
+        current_label = self._browser_key_to_label.get(self.recorder.browser.browser, "Chrome")
+        if self.browser_combo.get() != current_label:
+            self.browser_combo.set(current_label)
+            self.log(f"→ ブラウザを{current_label}に切り替えました"
+                      "(このマクロを記録したときのブラウザに合わせました)")
 
         self.base_step_count = len(self.recorder.steps)
         self.recorder.variables = {}

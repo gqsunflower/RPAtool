@@ -38,6 +38,7 @@ from typing import Any
 from openpyxl.utils import column_index_from_string, get_column_letter
 
 from engine.backup import backup_file
+from engine.executor import _substitute
 from handlers.browser_handler import (
     BrowserHandler,
     ElementNotFoundError,
@@ -168,11 +169,14 @@ class MacroRecorder:
 
         入力した値の中に "{{変数名}}" が含まれている場合(前の手順で
         store_as した結果を埋め込みたい場合)は、それをそのままテンプレートとして
-        登録し、動作確認用にだけ別途「実際の値に置き換えたもの」を聞く。
+        登録しつつ、動作確認には今の記録セッションで実際に確認できている
+        変数の値(self.variables)を使って自動的に解決した値を使う。
         例: 値として "A1:B{{last_row}}" と入力すると、そのまま登録され、
-        動作確認では「A1:B10」のような具体的な値で試せる。
+        動作確認では実際のlast_rowの値を使って「A1:B10」のように自動で試せる。
         "{{last_row+1}}" のように変数名の後ろに +数値/-数値 を付けると、
         その場で加減算した値を使える(「最終行の次の行」等)。
+        For文のカウンタ("{{i}}"等)のようにまだ値が確定していない場合や、
+        未対応の書き方の場合だけ、実際の値を別途聞く。
         値全体がスロットの場合は従来どおり「スロット名」欄で指定する
         (スロットは実行のたびに外部から与える値、{{変数名}}の直接入力は
         前の手順の結果を埋め込む値、という使い分け)。
@@ -186,10 +190,15 @@ class MacroRecorder:
             return None
 
         if "{{" in value and "}}" in value:
-            test_value = self._ask(
-                f"  動作確認用に、実際の値に置き換えたものを入力してください(例: {value}): "
-            )
-            return test_value, value
+            try:
+                resolved = _substitute(value, self.variables)
+            except (KeyError, ValueError, IndexError) as e:
+                test_value = self._ask(
+                    f"  '{value}' の中の変数を、記録済みの値からは自動的に解決できませんでした"
+                    f"({e})。動作確認用に、実際の値に置き換えたものを入力してください: "
+                )
+                return test_value, value
+            return str(resolved), value
 
         slot_name = self._ask(
             "  この値は実行するたびに変わりますか? 変わる場合はスロット名を、固定値ならそのままEnter: "
@@ -4160,5 +4169,22 @@ class MacroRecorder:
         self.steps = list(macro.get("steps", []))
         self.required_slots = list(macro.get("required_slots", []))
         self.loaded_macro_name = macro_name
+
+        # このマクロを記録したときに使っていたブラウザ(chrome/edge)が
+        # 保存されていて、かつ今の設定と異なる場合は、状態を再現する前に
+        # 同じブラウザへ切り替えておく(そうしないとサイトの再現や、
+        # 続けてのpy/exe出力が違うブラウザのまま行われてしまうため)。
+        saved_browser = macro.get("browser")
+        if saved_browser and saved_browser != self.browser.browser:
+            try:
+                if self._site_opened:
+                    self.browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self.browser = BrowserHandler(
+                self.config_dir / "whitelist_urls.json", headless=False, browser=saved_browser,
+            )
+            self._site_opened = False
+
         self._replay_warnings = self.replay_state(self.steps)
         return macro
