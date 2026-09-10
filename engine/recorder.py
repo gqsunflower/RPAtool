@@ -32,6 +32,7 @@ Excel・PDF・Webサイト・エクスプローラー・実行ファイルの操
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,11 @@ from handlers.process_handler import ProcessHandler
 from handlers.text_handler import TextHandler
 
 CANCEL_WORDS = {"キャンセル", "cancel", "戻る", "やめる"}
+
+# デスクトップのキー送信系(type_text/press_key)を記録時に動作確認する際、
+# 確認直後は記録ツール自身のウィンドウ(GUIのウィンドウ/CLIのターミナル)が
+# フォーカスされたままのため、送信先を切り替える猶予として待ってから送信する。
+DESKTOP_SEND_DELAY_SECONDS = 3
 
 
 def _offset_template(var_name: str, offset: int) -> str:
@@ -3459,6 +3465,10 @@ class MacroRecorder:
             print("  → 中止しました。この手順は登録しません。\n")
             return
 
+        print(f"  {DESKTOP_SEND_DELAY_SECONDS}秒後に送信します。今すぐ入力したいウィンドウを"
+              "クリックしてアクティブにしてください...")
+        time.sleep(DESKTOP_SEND_DELAY_SECONDS)
+
         try:
             self.desktop.type_text(test_value)
             print("  → 実際に入力できました。")
@@ -3483,6 +3493,10 @@ class MacroRecorder:
         if confirm.lower() != "y":
             print("  → 中止しました。この手順は登録しません。\n")
             return
+
+        print(f"  {DESKTOP_SEND_DELAY_SECONDS}秒後に送信します。今すぐ送信したいウィンドウを"
+              "クリックしてアクティブにしてください...")
+        time.sleep(DESKTOP_SEND_DELAY_SECONDS)
 
         try:
             self.desktop.press_key(key_raw)

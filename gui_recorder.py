@@ -37,7 +37,11 @@ sys.path.insert(0, str(BASE_DIR))
 
 from engine.codegen import UnsupportedMacroError, build_exe, generate_script  # noqa: E402
 from engine.executor import MacroExecutor, _substitute  # noqa: E402
-from engine.recorder import MacroRecorder, check_control_flow_integrity  # noqa: E402
+from engine.recorder import (  # noqa: E402
+    DESKTOP_SEND_DELAY_SECONDS,
+    MacroRecorder,
+    check_control_flow_integrity,
+)
 from handlers.browser_handler import (  # noqa: E402
     PDF_PAPER_SIZES_INCHES,
     BrowserHandler,
@@ -471,6 +475,7 @@ class RecorderApp(_AppBase):
 
         self.recorder = MacroRecorder(CONFIG_DIR, browser=browser)
         self.base_step_count = 0
+        self._last_registered_index: int | None = None
 
         self._build_layout()
         self._on_domain_changed()
@@ -586,6 +591,19 @@ class RecorderApp(_AppBase):
         steps_move_col.pack(side="left", fill="y", padx=(4, 0))
         ttk.Button(steps_move_col, text="↑", width=3, command=self._move_step_up).pack(pady=(0, 2))
         ttk.Button(steps_move_col, text="↓", width=3, command=self._move_step_down).pack()
+        ttk.Button(
+            steps_move_col, text="削除", width=6, command=self._delete_selected_step,
+        ).pack(pady=(10, 2))
+        ttk.Button(
+            steps_move_col, text="編集", width=6, command=self._edit_selected_step_params,
+        ).pack()
+
+        self.insert_before_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            steps_frame, text="選択した手順の直前に、新しく登録する手順を挿入する"
+            "(オフなら末尾に追加)",
+            variable=self.insert_before_var,
+        ).pack(anchor="w", pady=(4, 0))
 
         var_frame = ttk.LabelFrame(right, text="変数一覧(記録時点の値)", padding=4)
         var_frame.pack(fill="both", expand=True)
@@ -618,6 +636,7 @@ class RecorderApp(_AppBase):
     def _swap_steps(self, idx_a: int, idx_b: int, select: int) -> None:
         steps = self.recorder.steps
         steps[idx_a], steps[idx_b] = steps[idx_b], steps[idx_a]
+        self._last_registered_index = None  # 並べ替え後は「元に戻す」を末尾基準にフォールバックさせる
         self.refresh_steps()
         self.steps_listbox.selection_set(select)
         self.steps_listbox.see(select)
@@ -641,14 +660,33 @@ class RecorderApp(_AppBase):
     def register_step(self, step: dict, value: Any = _NO_VALUE) -> None:
         """手順を登録する。value を渡すと(store_asが設定されている場合)、
         記録時点で確認できた実値として変数一覧パネルにも反映する。
+
+        「選択した手順の直前に挿入する」がONで、手順一覧で何か選択されて
+        いる場合は、末尾への追加ではなくその位置に挿入する。挿入した場合は
+        続けて登録する手順が自然に後ろへ積み上がるよう、選択位置を1つ
+        後ろへ進める。
         """
-        self.recorder.steps.append(step)
+        insert_mode = self.insert_before_var.get()
+        sel = self.steps_listbox.curselection() if insert_mode else ()
+        idx = sel[0] if sel else len(self.recorder.steps)
+        self.recorder.steps.insert(idx, step)
+        self._last_registered_index = idx
+
         store_as = step.get("store_as")
         if store_as and value is not _NO_VALUE:
             self.recorder.record_variable(store_as, value)
             self.refresh_variables()
         self.refresh_steps()
-        self.log(f"✅ 登録しました: {step['handler']}.{step['action']}")
+
+        if insert_mode:
+            next_idx = idx + 1
+            self.steps_listbox.selection_clear(0, "end")
+            if next_idx < len(self.recorder.steps):
+                self.steps_listbox.selection_set(next_idx)
+                self.steps_listbox.see(next_idx)
+            self.log(f"✅ 登録しました(手順{idx + 1}に挿入): {step['handler']}.{step['action']}")
+        else:
+            self.log(f"✅ 登録しました: {step['handler']}.{step['action']}")
 
     def refresh_variables(self) -> None:
         self.variables_tree.delete(*self.variables_tree.get_children())
@@ -3817,6 +3855,10 @@ class RecorderApp(_AppBase):
                 test_v, param_v, _ = field.get()
                 if not self._confirm("今フォーカスされている場所に実際にキー入力します。よろしいですか?"):
                     return
+                self.log(f"→ {DESKTOP_SEND_DELAY_SECONDS}秒後に送信します。今すぐ入力したい"
+                          "ウィンドウをクリックしてアクティブにしてください...")
+                self.update_idletasks()
+                time.sleep(DESKTOP_SEND_DELAY_SECONDS)
                 try:
                     self.recorder.desktop.type_text(test_v)
                     self.log("→ 入力できました")
@@ -3838,6 +3880,10 @@ class RecorderApp(_AppBase):
                     return
                 if not self._confirm(f"'{key}' を実際に送信します。よろしいですか?"):
                     return
+                self.log(f"→ {DESKTOP_SEND_DELAY_SECONDS}秒後に送信します。今すぐ送信したい"
+                          "ウィンドウをクリックしてアクティブにしてください...")
+                self.update_idletasks()
+                time.sleep(DESKTOP_SEND_DELAY_SECONDS)
                 try:
                     self.recorder.desktop.press_key(key)
                     self.log(f"→ 送信できました: {key}")
@@ -4497,11 +4543,11 @@ class RecorderApp(_AppBase):
 
     # ---------- 元に戻す / 保存 / 中止 ----------
 
-    def _undo(self) -> None:
-        if len(self.recorder.steps) <= self.base_step_count:
-            self.log("これ以上は取り消せません。")
-            return
-        removed = self.recorder.steps.pop()
+    def _cleanup_after_step_removed(self, removed: dict) -> None:
+        """手順を削除(取り消し/削除ボタン共通)した後の後始末。
+        その手順でしか使われていなかったスロットや、store_asで保存した
+        変数一覧の表示を掃除する。
+        """
         if removed["handler"] == "browser" and removed["action"] == "open_registered_site":
             self.recorder._site_opened = False
 
@@ -4520,8 +4566,79 @@ class RecorderApp(_AppBase):
             del self.recorder.variables[removed_store_as]
             self.refresh_variables()
 
+    def _undo(self) -> None:
+        if len(self.recorder.steps) <= self.base_step_count:
+            self.log("これ以上は取り消せません。")
+            return
+        idx = self._last_registered_index
+        if idx is None or idx >= len(self.recorder.steps):
+            idx = len(self.recorder.steps) - 1
+        removed = self.recorder.steps.pop(idx)
+        self._last_registered_index = None
+        self._cleanup_after_step_removed(removed)
         self.refresh_steps()
-        self.log(f"直前の操作を取り消しました: {removed['handler']}.{removed['action']}")
+        self.log(f"直前の操作を取り消しました(手順{idx + 1}): {removed['handler']}.{removed['action']}")
+
+    def _delete_selected_step(self) -> None:
+        sel = self.steps_listbox.curselection()
+        if not sel:
+            self.log("→ 削除する手順を、一覧から選んでください。")
+            return
+        idx = sel[0]
+        step = self.recorder.steps[idx]
+        if not self._confirm(
+            f"手順{idx + 1}({step['handler']}.{step['action']})を削除します。よろしいですか?"
+        ):
+            return
+        removed = self.recorder.steps.pop(idx)
+        self._last_registered_index = None
+        self._cleanup_after_step_removed(removed)
+        self.refresh_steps()
+        self.log(f"→ 手順{idx + 1}を削除しました: {removed['handler']}.{removed['action']}")
+
+    def _edit_selected_step_params(self) -> None:
+        sel = self.steps_listbox.curselection()
+        if not sel:
+            self.log("→ 編集する手順を、一覧から選んでください。")
+            return
+        idx = sel[0]
+        step = self.recorder.steps[idx]
+
+        win = tk.Toplevel(self)
+        win.title(f"手順{idx + 1}を編集: {step['handler']}.{step['action']}")
+        win.grab_set()
+        ttk.Label(
+            win,
+            text=f"{step['handler']}.{step['action']} のパラメータをJSON形式で編集できます。\n"
+            "ここでの編集は動作確認をしないため、保存後は「テスト実行」で"
+            "この手順から動作を確認することをおすすめします。",
+            foreground="#557", wraplength=440, justify="left",
+        ).pack(anchor="w", padx=10, pady=(10, 4))
+        text = scrolledtext.ScrolledText(win, width=60, height=16)
+        text.insert("1.0", json.dumps(step.get("params", {}), ensure_ascii=False, indent=2))
+        text.pack(padx=10, pady=(0, 6), fill="both", expand=True)
+
+        def do_save():
+            raw = text.get("1.0", "end").strip()
+            try:
+                new_params = json.loads(raw)
+            except json.JSONDecodeError as e:
+                messagebox.showerror("JSONエラー", f"正しいJSON形式で入力してください: {e}")
+                return
+            if not isinstance(new_params, dict):
+                messagebox.showerror("入力エラー", "paramsは {} 形式(オブジェクト)で入力してください。")
+                return
+            step["params"] = new_params
+            self.refresh_steps()
+            self.steps_listbox.selection_set(idx)
+            self.steps_listbox.see(idx)
+            win.destroy()
+            self.log(f"→ 手順{idx + 1}のパラメータを更新しました: {step['handler']}.{step['action']}")
+
+        btns = ttk.Frame(win)
+        btns.pack(pady=(0, 10))
+        ttk.Button(btns, text="保存", command=do_save).pack(side="left", padx=4)
+        ttk.Button(btns, text="キャンセル", command=win.destroy).pack(side="left", padx=4)
 
     def _finish(self) -> None:
         if not self.recorder.steps:
