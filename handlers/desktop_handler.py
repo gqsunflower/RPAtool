@@ -29,6 +29,7 @@ DesktopHandler: 画面上の画像を探してマウス移動・クリックす�
 from __future__ import annotations
 
 import ctypes
+import ctypes.wintypes
 import logging
 import time
 from pathlib import Path
@@ -58,6 +59,76 @@ def _import_pyautogui():
             "opencv-python も必要です(pip install opencv-python)。"
         ) from e
     return pyautogui
+
+
+# type_text用: Windows APIのSendInputをKEYEVENTF_UNICODEで呼び出し、キーボード
+# レイアウトに依存せずどんな文字でも(日本語含む)正確に送信するための定義。
+# pyautoguiのwrite()はASCII文字しか送れず、かつ仮想キーコード経由のため
+# キーボードレイアウト(日本語106/109キーボード等)によっては記号の対応が
+# ずれてしまう("C:"が"C*"になる、等)問題があった。KEYEVENTF_UNICODEは
+# レイアウトを介さず直接Unicodeのコードポイントを送るため、両方の問題を回避できる。
+_INPUT_KEYBOARD = 1
+_KEYEVENTF_UNICODE = 0x0004
+_KEYEVENTF_KEYUP = 0x0002
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", ctypes.wintypes.LONG),
+        ("dy", ctypes.wintypes.LONG),
+        ("mouseData", ctypes.wintypes.DWORD),
+        ("dwFlags", ctypes.wintypes.DWORD),
+        ("time", ctypes.wintypes.DWORD),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.wintypes.ULONG)),
+    ]
+
+
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", ctypes.wintypes.WORD),
+        ("wScan", ctypes.wintypes.WORD),
+        ("dwFlags", ctypes.wintypes.DWORD),
+        ("time", ctypes.wintypes.DWORD),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.wintypes.ULONG)),
+    ]
+
+
+class _HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [
+        ("uMsg", ctypes.wintypes.DWORD),
+        ("wParamL", ctypes.wintypes.WORD),
+        ("wParamH", ctypes.wintypes.WORD),
+    ]
+
+
+class _INPUT_UNION(ctypes.Union):
+    # SendInputのcbSize引数がWindows側の期待するsizeof(INPUT)と一致しないと
+    # ERROR_INVALID_PARAMETER(87)になるため、実際のWin32 INPUT構造体と同じく
+    # mi/ki/hiすべてを含めて共用体のサイズを一致させる(kiだけにすると
+    # 64bit環境でmiより小さくなり、サイズが合わなくなる)。
+    _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT), ("hi", _HARDWAREINPUT)]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [("type", ctypes.wintypes.DWORD), ("union", _INPUT_UNION)]
+
+
+def _send_unicode_char(user32, ch: str) -> None:
+    code = ord(ch)
+    extra = ctypes.pointer(ctypes.wintypes.ULONG(0))
+    down = _INPUT(
+        type=_INPUT_KEYBOARD,
+        union=_INPUT_UNION(ki=_KEYBDINPUT(0, code, _KEYEVENTF_UNICODE, 0, extra)),
+    )
+    up = _INPUT(
+        type=_INPUT_KEYBOARD,
+        union=_INPUT_UNION(ki=_KEYBDINPUT(0, code, _KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP, 0, extra)),
+    )
+    inputs = (_INPUT * 2)(down, up)
+    sent = user32.SendInput(2, ctypes.pointer(inputs), ctypes.sizeof(_INPUT))
+    if sent != 2:
+        err = ctypes.get_last_error()
+        raise RuntimeError(f"文字の送信に失敗しました('{ch}', Windowsエラーコード: {err})")
 
 
 class DesktopHandler:
@@ -335,9 +406,20 @@ class DesktopHandler:
         return f"clicked at: ({x}, {y})"
 
     def type_text(self, text: str, interval: float = 0.02) -> str:
-        """今フォーカスされている場所に文字列を入力する(OSのキーボード入力として送る)。"""
-        gui = self._gui()
-        gui.write(text, interval=interval)
+        """今フォーカスされている場所に文字列を入力する(OSのキーボード入力として送る)。
+        Windows APIのSendInput(KEYEVENTF_UNICODE)を直接使っており、日本語等の
+        Unicode文字も、キーボードレイアウトに関わらず正確に送信できる
+        (pyautogui.writeはASCII文字しか送れず、レイアウトによっては記号が
+        化けることがあったため置き換えた)。
+        """
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        for ch in text:
+            if ch == "\n":
+                self.press_key("enter")
+            else:
+                _send_unicode_char(user32, ch)
+            if interval > 0:
+                time.sleep(interval)
         return f"typed: {text}"
 
     def press_key(self, key: str) -> str:
