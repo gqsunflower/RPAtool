@@ -105,6 +105,7 @@ DOMAIN_ACTIONS = {
         "フレーム一覧を見る", "フレームに切り替える", "元のページ(フレーム外)に戻る",
         "1段階だけ親フレームに戻る",
         "ダウンロード先フォルダを指定する", "ダウンロードの完了を待つ",
+        "文字を基準にずらした位置をクリックする", "同じ文字列が複数ある時に番号で指定してクリックする",
     ],
     "explorer": [
         "パスを開く", "フォルダを作成する", "ファイルを移動する", "ファイルをコピーする",
@@ -120,6 +121,7 @@ DOMAIN_ACTIONS = {
         "開いているウィンドウのタイトル一覧を見る", "ウィンドウをアクティブにする",
         "ウィンドウサイズを指定する(タイトル指定)", "ウィンドウ位置を指定する(タイトル指定)",
         "表示倍率(ズーム)を指定する(キー操作)",
+        "画像を基準にずらした位置をクリックする", "画像2つの間の位置(%)をクリックする",
     ],
     "text": [
         "文字を探して切り出す", "文字を置換する", "日付・時刻を取得する",
@@ -587,6 +589,7 @@ class RecorderApp(_AppBase):
         steps_row.pack(fill="both", expand=True)
         self.steps_listbox = tk.Listbox(steps_row, exportselection=False)
         self.steps_listbox.pack(side="left", fill="both", expand=True)
+        self.steps_listbox.bind("<<ListboxSelect>>", self._on_step_selected)
         steps_move_col = ttk.Frame(steps_row)
         steps_move_col.pack(side="left", fill="y", padx=(4, 0))
         ttk.Button(steps_move_col, text="↑", width=3, command=self._move_step_up).pack(pady=(0, 2))
@@ -604,6 +607,18 @@ class RecorderApp(_AppBase):
             "(オフなら末尾に追加)",
             variable=self.insert_before_var,
         ).pack(anchor="w", pady=(4, 0))
+
+        preview_frame = ttk.LabelFrame(right, text="選択した手順のプレビュー", padding=4)
+        preview_frame.pack(fill="x", pady=(0, 4))
+        self.step_preview_label = ttk.Label(
+            preview_frame, text="(デスクトップの画像を使う手順を選ぶと\nここに画像が表示されます)",
+            foreground="#557", justify="left",
+        )
+        self.step_preview_label.pack(anchor="w")
+        self.step_preview_label2 = ttk.Label(preview_frame)
+        self.step_preview_label2.pack(anchor="w")
+        self._step_preview_img = None  # 参照保持(GC対策)
+        self._step_preview_img2 = None
 
         var_frame = ttk.LabelFrame(right, text="変数一覧(記録時点の値)", padding=4)
         var_frame.pack(fill="both", expand=True)
@@ -632,6 +647,64 @@ class RecorderApp(_AppBase):
             self.steps_listbox.insert(
                 "end", f"{i}. {step['handler']}.{step['action']}  {step.get('params', {})}"
             )
+        # delete/insertで選択状態がリセットされるため、プレビューも合わせて更新する
+        # (選択解除された場合は空表示に、選択が残っていればそれに合わせる)。
+        self._on_step_selected()
+
+    # デスクトップの画像を使う手順ごとに、プレビュー対象のparamsキー
+    # (何枚目かのラベルも合わせて持つ)。
+    _DESKTOP_IMAGE_ACTIONS: dict[str, tuple[tuple[str, str], ...]] = {
+        "locate_and_click": (("image_path", ""),),
+        "move_to_image": (("image_path", ""),),
+        "click_offset_from_image": (("image_path", ""),),
+        "click_between_images": (("image_path_a", "A: "), ("image_path_b", "B: ")),
+    }
+
+    def _on_step_selected(self, event=None) -> None:
+        sel = self.steps_listbox.curselection()
+        if not sel or sel[0] >= len(self.recorder.steps):
+            self._clear_step_preview()
+            return
+        step = self.recorder.steps[sel[0]]
+        keys = self._DESKTOP_IMAGE_ACTIONS.get(step.get("action")) if step.get("handler") == "desktop" else None
+        if not keys:
+            self._clear_step_preview()
+            return
+        params = step.get("params", {})
+        self._show_step_preview([(params.get(k), prefix) for k, prefix in keys])
+
+    def _clear_step_preview(self) -> None:
+        self.step_preview_label.configure(
+            image="", text="(デスクトップの画像を使う手順を選ぶと\nここに画像が表示されます)",
+        )
+        self.step_preview_label2.configure(image="", text="")
+        self._step_preview_img = None
+        self._step_preview_img2 = None
+
+    def _show_step_preview(self, entries: list[tuple[Any, str]]) -> None:
+        labels = [self.step_preview_label, self.step_preview_label2]
+        attr_names = ["_step_preview_img", "_step_preview_img2"]
+        for i, lbl in enumerate(labels):
+            if i >= len(entries) or not entries[i][0]:
+                lbl.configure(image="", text="")
+                setattr(self, attr_names[i], None)
+                continue
+            path, prefix = entries[i]
+            if "{{" in str(path):
+                lbl.configure(image="", text=f"{prefix}(テンプレート化されているため表示不可)\n{path}")
+                setattr(self, attr_names[i], None)
+                continue
+            try:
+                from PIL import Image, ImageTk
+
+                img = Image.open(path)
+                img.thumbnail((220, 160))
+                photo = ImageTk.PhotoImage(img)
+                lbl.configure(image=photo, text=f"{prefix}{Path(path).name}", compound="top")
+                setattr(self, attr_names[i], photo)  # GC対策で参照保持
+            except Exception:  # noqa: BLE001
+                lbl.configure(image="", text=f"{prefix}(プレビュー表示できませんでした)\n{path}")
+                setattr(self, attr_names[i], None)
 
     def _swap_steps(self, idx_a: int, idx_b: int, select: int) -> None:
         steps = self.recorder.steps
@@ -640,6 +713,7 @@ class RecorderApp(_AppBase):
         self.refresh_steps()
         self.steps_listbox.selection_set(select)
         self.steps_listbox.see(select)
+        self._on_step_selected()
         for w in check_control_flow_integrity(steps):
             self.log(f"⚠ 制御構文の整合性チェック: {w}")
 
@@ -684,6 +758,7 @@ class RecorderApp(_AppBase):
             if next_idx < len(self.recorder.steps):
                 self.steps_listbox.selection_set(next_idx)
                 self.steps_listbox.see(next_idx)
+            self._on_step_selected()
             self.log(f"✅ 登録しました(手順{idx + 1}に挿入): {step['handler']}.{step['action']}")
         else:
             self.log(f"✅ 登録しました: {step['handler']}.{step['action']}")
@@ -1034,6 +1109,7 @@ class RecorderApp(_AppBase):
             self.steps_listbox.selection_clear(0, "end")
             self.steps_listbox.selection_set(step_number - 1)
             self.steps_listbox.see(step_number - 1)
+            self._on_step_selected()
             self.log(f"  → ステップ{step_number}を選択しました。手順の一覧から確認・修正してください。")
 
         ttk.Button(btns, text="中止して手順を確認", command=do_edit).pack(side="left", padx=4)
@@ -3109,6 +3185,109 @@ class RecorderApp(_AppBase):
 
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
+        elif action == "文字を基準にずらした位置をクリックする":
+            ttk.Label(
+                f, text="目印にしたい文字自体はクリック対象ではなく、その近くにある文字を持たない"
+                "要素(無名のアイコンボタン等)をクリックしたい場合に使います。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
+            text_field = ValueSlotField(f, "目印にする文字")
+            text_field.pack(fill="x", pady=4)
+            dx_field = PlainField(f, "目印の中心から右へ何ピクセル(左なら負の数)")
+            dx_field.pack(fill="x", pady=4)
+            dy_field = PlainField(f, "目印の中心から下へ何ピクセル(上なら負の数)")
+            dy_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                text_test, text_param, _ = text_field.get()
+                try:
+                    dx, dy = int(dx_field.get() or "0"), int(dy_field.get() or "0")
+                except ValueError:
+                    self.log("⚠ ずらす量は数字で入力してください")
+                    return
+                try:
+                    self.recorder.browser.click_offset_from_text(text_test, dx=dx, dy=dy)
+                    self.log(f"→ '{text_test}' を目印に、指定した位置をクリックできました")
+                    verify_cfg = self._ask_verify()
+                    retry_cfg = self._ask_retry()
+                    self.register_step({
+                        "handler": "browser", "action": "click_offset_from_text",
+                        "params": {"text_hint": text_param, "dx": dx, "dy": dy},
+                        "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "同じ文字列が複数ある時に番号で指定してクリックする":
+            ttk.Label(
+                f, text="同じ文字列のボタン/リンクが画面に複数ある場合に、何番目をクリックするか"
+                "を指定します。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
+            text_field = PlainField(f, "目印にする文字")
+            text_field.pack(fill="x", pady=4)
+
+            listbox = tk.Listbox(f, height=8, width=75)
+            listbox.pack(fill="both", expand=True, pady=(4, 6))
+            items: list[dict] = []
+
+            def refresh_list():
+                text_hint = text_field.get().strip()
+                listbox.delete(0, "end")
+                items.clear()
+                if not text_hint:
+                    self.log("⚠ 目印にする文字を入力してください")
+                    return
+                try:
+                    result = self.recorder.browser.list_elements_by_text(text_hint)
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ 一覧の取得に失敗しました: {e}")
+                    return
+                items.extend(result)
+                if not items:
+                    listbox.insert("end", "(一致する要素が見つかりませんでした)")
+                    return
+                for item in items:
+                    listbox.insert("end", f"{item['index']}. [{item['tag']}] {item['text']}")
+
+            ttk.Button(f, text="一致する要素を一覧表示", command=refresh_list).pack(anchor="w")
+
+            obstruction_field = PlainField(
+                f, "広告等に妨害された場合、手動で閉じるのを待つ最大秒数(空欄で待機しない)", width=10,
+            )
+            obstruction_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                sel = listbox.curselection()
+                if not sel or not items:
+                    self.log("⚠ 一覧から対象を選んでください")
+                    return
+                text_hint = text_field.get().strip()
+                index = items[sel[0]]["index"]
+                try:
+                    obstruction_wait = float(obstruction_field.get().strip() or "0")
+                except ValueError:
+                    obstruction_wait = 0
+                try:
+                    self.recorder.browser.click_by_text_index(text_hint, index)
+                    self.log(f"→ '{text_hint}' の{index}番目をクリックできました")
+                    verify_cfg = self._ask_verify()
+                    retry_cfg = self._ask_retry()
+                    self.register_step({
+                        "handler": "browser", "action": "click_by_text_index",
+                        "params": {
+                            "text_hint": text_hint, "index": index,
+                            "obstruction_wait_seconds": obstruction_wait,
+                        },
+                        "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="選択した番号で動作確認して登録", command=on_submit).pack(pady=6)
+
     def _build_web_index_kind(self, parent: ttk.Frame, kind: str) -> None:
         """番号指定操作の一覧プレビュー(Listbox)+ 種類ごとの入力欄 + 登録ボタンを作る。"""
         listbox = tk.Listbox(parent, height=8, width=75)
@@ -3820,6 +3999,120 @@ class RecorderApp(_AppBase):
                                 "image_path": param_path, "confidence": confidence,
                                 "timeout": 10, "region": region,
                             },
+                        })
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "画像を基準にずらした位置をクリックする":
+            ttk.Label(
+                f, text="クリックしたい場所そのものには目印画像が無いが、近くに目印にできる"
+                "画像がある場合に使います。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
+            img_field = ImagePasteField(f, "目印にする画像")
+            img_field.pack(fill="x", pady=4)
+            dx_field = PlainField(f, "目印の中心から右へ何ピクセル(左なら負の数)")
+            dx_field.pack(fill="x", pady=4)
+            dy_field = PlainField(f, "目印の中心から下へ何ピクセル(上なら負の数)")
+            dy_field.pack(fill="x", pady=4)
+            conf_field = PlainField(f, "一致の緩さ(confidence, 0.1〜1.0)", default="0.8")
+            conf_field.pack(fill="x", pady=4)
+            slot_field = PlainField(f, "画像パスをスロットにする場合のスロット名(任意)")
+            slot_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                image_path = img_field.get()
+                if not image_path:
+                    self.log("⚠ 画像を指定してください(貼り付け または 参照)")
+                    return
+                try:
+                    dx, dy = int(dx_field.get() or "0"), int(dy_field.get() or "0")
+                except ValueError:
+                    self.log("⚠ ずらす量は数字で入力してください")
+                    return
+                try:
+                    confidence = float(conf_field.get() or "0.8")
+                except ValueError:
+                    confidence = 0.8
+                slot_name = slot_field.get().strip()
+                param_path = "{{" + slot_name + "}}" if slot_name else image_path
+
+                params = {
+                    "image_path": param_path, "dx": dx, "dy": dy,
+                    "confidence": confidence, "timeout": 10, "region": None,
+                }
+                try:
+                    self._run_screen_search_hidden(
+                        self.recorder.desktop.click_offset_from_image,
+                        image_path, dx=dx, dy=dy, confidence=confidence, timeout=10,
+                    )
+                    self.log("→ 画像を見つけて、指定した位置をクリックできました")
+                    retry_cfg = self._ask_retry()
+                    self.register_step({
+                        "handler": "desktop", "action": "click_offset_from_image",
+                        "params": params, "retry": retry_cfg,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+                    if self._confirm("未確認のままこの手順を登録しますか?"):
+                        self.register_step({
+                            "handler": "desktop", "action": "click_offset_from_image", "params": params,
+                        })
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "画像2つの間の位置(%)をクリックする":
+            ttk.Label(
+                f, text="目印になる画像が2つ離れた位置にあり、その間の決まった位置を"
+                "クリックしたい場合に使います。画像Aを0%、画像Bを100%とした間の位置を指定します。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
+            img_a_field = ImagePasteField(f, "1つ目(基準0%側)の画像")
+            img_a_field.pack(fill="x", pady=4)
+            img_b_field = ImagePasteField(f, "2つ目(基準100%側)の画像")
+            img_b_field.pack(fill="x", pady=4)
+            pos_field = PlainField(f, "間の何%の位置をクリックするか", default="50")
+            pos_field.pack(fill="x", pady=4)
+            conf_field = PlainField(f, "一致の緩さ(confidence, 0.1〜1.0)", default="0.8")
+            conf_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                image_a = img_a_field.get()
+                image_b = img_b_field.get()
+                if not image_a or not image_b:
+                    self.log("⚠ 画像を2つとも指定してください(貼り付け または 参照)")
+                    return
+                try:
+                    position_percent = float(pos_field.get() or "50")
+                except ValueError:
+                    self.log("⚠ 位置(%)は数字で入力してください")
+                    return
+                try:
+                    confidence = float(conf_field.get() or "0.8")
+                except ValueError:
+                    confidence = 0.8
+
+                params = {
+                    "image_path_a": image_a, "image_path_b": image_b,
+                    "position_percent": position_percent,
+                    "confidence": confidence, "timeout": 10, "region": None,
+                }
+                try:
+                    self._run_screen_search_hidden(
+                        self.recorder.desktop.click_between_images,
+                        image_a, image_b, position_percent=position_percent, confidence=confidence, timeout=10,
+                    )
+                    self.log("→ 2つの画像を見つけて、指定した位置をクリックできました")
+                    retry_cfg = self._ask_retry()
+                    self.register_step({
+                        "handler": "desktop", "action": "click_between_images",
+                        "params": params, "retry": retry_cfg,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+                    if self._confirm("未確認のままこの手順を登録しますか?"):
+                        self.register_step({
+                            "handler": "desktop", "action": "click_between_images", "params": params,
                         })
 
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
@@ -4632,6 +4925,7 @@ class RecorderApp(_AppBase):
             self.refresh_steps()
             self.steps_listbox.selection_set(idx)
             self.steps_listbox.see(idx)
+            self._on_step_selected()
             win.destroy()
             self.log(f"→ 手順{idx + 1}のパラメータを更新しました: {step['handler']}.{step['action']}")
 

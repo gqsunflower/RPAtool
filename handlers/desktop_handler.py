@@ -395,6 +395,66 @@ class DesktopHandler:
         logger.info("画像を見つけてクリックしました: %s -> (%d, %d)", image_path, center.x, center.y)
         return f"clicked at: ({center.x}, {center.y})"
 
+    def click_offset_from_image(
+        self,
+        image_path: str,
+        dx: int = 0,
+        dy: int = 0,
+        confidence: float = 0.8,
+        timeout: float = 10,
+        button: str = "left",
+        clicks: int = 1,
+        region: tuple[int, int, int, int] | list[int] | None = None,
+    ) -> str:
+        """画面上から image_path の画像を探し、見つかった位置の中心から
+        dx(右方向がプラス)、dy(下方向がプラス)だけずれた位置をクリックする。
+        クリックしたい場所そのものには目印になる画像が無いが、近くに
+        目印にできる画像がある場合(例: 見出しアイコンの右にある無地のボタン)に使う。
+        """
+        gui = self._gui()
+        box = self._locate(image_path, confidence, timeout, region=region)
+        center = gui.center(box)
+        x, y = center.x + dx, center.y + dy
+        gui.moveTo(x, y, duration=0.2)
+        gui.click(x, y, button=button, clicks=clicks)
+        logger.info(
+            "画像基準でオフセットクリックしました: %s + (%d,%d) -> (%d, %d)",
+            image_path, dx, dy, x, y,
+        )
+        return f"clicked at offset: ({x}, {y})"
+
+    def click_between_images(
+        self,
+        image_path_a: str,
+        image_path_b: str,
+        position_percent: float = 50,
+        confidence: float = 0.8,
+        timeout: float = 10,
+        button: str = "left",
+        clicks: int = 1,
+        region: tuple[int, int, int, int] | list[int] | None = None,
+    ) -> str:
+        """画面上から2つの画像(image_path_a, image_path_b)を探し、それぞれの
+        中心を結ぶ線分上で、Aからposition_percent%進んだ位置をクリックする
+        (0なら画像Aの位置、100なら画像Bの位置、50なら中点)。一覧の行のように
+        目印になる画像が離れて2つあり、その間の決まった位置をクリックしたい
+        場合に使う。
+        """
+        gui = self._gui()
+        box_a = self._locate(image_path_a, confidence, timeout, region=region)
+        box_b = self._locate(image_path_b, confidence, timeout, region=region)
+        ca, cb = gui.center(box_a), gui.center(box_b)
+        t = position_percent / 100
+        x = int(round(ca.x + (cb.x - ca.x) * t))
+        y = int(round(ca.y + (cb.y - ca.y) * t))
+        gui.moveTo(x, y, duration=0.2)
+        gui.click(x, y, button=button, clicks=clicks)
+        logger.info(
+            "2画像間の位置(%.1f%%)をクリックしました: %s <-> %s -> (%d, %d)",
+            position_percent, image_path_a, image_path_b, x, y,
+        )
+        return f"clicked at: ({x}, {y})"
+
     def click_at(self, x: int, y: int, button: str = "left", clicks: int = 1) -> str:
         """座標を直接指定してクリックする(画像検索がうまくいかない場合の代替手段)。
         画面解像度・ウィンドウ配置に依存するため、可能な限りlocate_and_clickを優先すること。

@@ -713,6 +713,58 @@ class BrowserHandler:
         logger.info("テキスト一致でクリックしました: '%s' (候補%d件中1件目)", text_hint, len(candidates))
         return f"clicked by text: {text_hint}"
 
+    def _find_text_landmark(self, text: str):
+        """指定した文字を含む、現在表示されている要素のうち、最も文字量が
+        少ない(面積が最小の)ものを1つ返す(クリック可能かどうかは問わない)。
+        click_by_text等が対象にする「ボタン/リンク」に限らず、見出し・ラベル・
+        表のセルなど任意の表示テキストを基準点にしたい場合に使う
+        (click_offset_from_text用)。面積が最小のものを選ぶのは、同じ文字を
+        含む要素が親子関係で複数マッチした場合に、最も文字にフィットした
+        (=クリック位置の基準として最も正確な)要素を選ぶため。
+        """
+        from selenium.webdriver.common.by import By
+
+        driver = self._get_driver()
+        lit = _xpath_literal(text)
+        xpath = f"//*[contains(normalize-space(.), {lit})]"
+        elements = [el for el in driver.find_elements(By.XPATH, xpath) if el.is_displayed()]
+        if not elements:
+            raise ElementNotFoundError(f"'{text}' に一致する、現在表示されている要素が見つかりませんでした")
+
+        def area(el) -> float:
+            rect = el.rect
+            return rect["width"] * rect["height"]
+
+        elements.sort(key=area)
+        return elements[0]
+
+    def click_offset_from_text(
+        self, text_hint: str, dx: int = 0, dy: int = 0, button: str = "left"
+    ) -> str:
+        """指定した文字を目印にして、その要素の中心からdx(右方向がプラス)、
+        dy(下方向がプラス)だけずれた位置をクリックする。目印の文字自体は
+        クリック対象ではない(例: 見出しの右にある無名のアイコンボタンなど、
+        目印に使える文字を持たない要素をクリックしたい)場合に使う。
+        click_by_textと異なり、ボタン/リンクに限らず任意の表示テキストを
+        目印にできる。
+        """
+        from selenium.webdriver import ActionChains
+
+        self._assert_still_on_site()
+        el = self._find_text_landmark(text_hint)
+        driver = self._get_driver()
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+        actions = ActionChains(driver)
+        actions.move_to_element_with_offset(el, dx, dy)
+        if button == "right":
+            actions.context_click()
+        else:
+            actions.click()
+        actions.perform()
+        self._assert_still_on_site()
+        logger.info("文字基準でオフセットクリックしました: '%s' + (%d,%d)", text_hint, dx, dy)
+        return f"clicked offset ({dx},{dy}) from text: {text_hint}"
+
     def _click_with_obstruction_wait(
         self,
         driver,
@@ -1259,6 +1311,40 @@ class BrowserHandler:
         )
         self._assert_still_on_site()
         return f"clicked by index: {index}"
+
+    def list_elements_by_text(self, text_hint: str) -> list[dict]:
+        """'{text_hint}'に一致する、現在表示されているボタン/リンクを1番目から
+        順に列挙する(同じ文字列が画面に複数ある場合に、click_by_text_indexで
+        指定する番号を確認するためのプレビュー用)。"""
+        xpath = self._build_clickable_xpath(text_hint)
+        elements = self._find_visible(xpath)
+        return [
+            {"index": i, "text": self._element_label(el), "tag": el.tag_name}
+            for i, el in enumerate(elements, start=1)
+        ]
+
+    def click_by_text_index(
+        self, text_hint: str, index: int, obstruction_wait_seconds: float = 0
+    ) -> str:
+        """'{text_hint}'に一致するボタン/リンクが画面に複数ある場合に、
+        list_elements_by_textで確認した番号(1始まり、一致するものの中での
+        順番)を指定してクリックする。click_by_textは常に1件目をクリックする
+        ため、同じ文字列が繰り返し出てくる一覧等で特定の1つを狙いたい場合に使う。
+        """
+        def _locate():
+            xpath = self._build_clickable_xpath(text_hint)
+            elements = self._find_visible(xpath)
+            if not (1 <= index <= len(elements)):
+                return []
+            return [elements[index - 1]]
+
+        driver = self._get_driver()
+        self._click_with_obstruction_wait(
+            driver, _locate, obstruction_wait_seconds,
+            f"'{text_hint}' に一致する{index}番目のボタン/リンク",
+        )
+        self._assert_still_on_site()
+        return f"clicked by text index: {text_hint}[{index}]"
 
     # ---- 入力欄 ----
 

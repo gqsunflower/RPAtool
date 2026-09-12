@@ -1860,6 +1860,9 @@ class MacroRecorder:
             print("  21) ダウンロード先フォルダを指定する(既定はworkdir/downloads)")
             print("  22) ダウンロードの完了を待つ(SharePoint等の「ダウンロード」")
             print("      ボタン押下後、保存されたファイルのパスを取得する)")
+            print("  23) 指定した文字を基準に、ずらした位置をクリックする")
+            print("      (目印文字の近くにある、文字を持たない要素をクリックしたい場合)")
+            print("  24) 同じ文字列が複数ある場合に、番号を指定してクリックする")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -1908,10 +1911,96 @@ class MacroRecorder:
                 self._record_set_download_directory()
             elif choice == "22":
                 self._record_wait_for_download()
+            elif choice == "23":
+                self._record_click_offset_text()
+            elif choice == "24":
+                self._record_click_text_index()
             elif choice == "0":
                 return
             else:
-                print("0〜22のいずれかを入力してください。\n")
+                print("0〜24のいずれかを入力してください。\n")
+
+    def _record_click_offset_text(self) -> None:
+        print("  ※ 目印にしたい文字自体はクリック対象ではなく、その近くにある")
+        print("     文字を持たない要素(無名のアイコンボタン等)をクリックしたい")
+        print("     場合に使います。目印文字の要素の中心からどれだけずれた")
+        print("     位置をクリックするかをピクセルで指定します。")
+        try:
+            text_hint = self._ask_target(
+                "  目印にする文字を入力してください(間違えた場合は「キャンセル」): "
+            )
+        except _ActionCancelled:
+            print("  → この操作の記録をキャンセルしました。メニューに戻ります。\n")
+            return
+
+        dx_raw = self._ask("  目印の中心から右へ何ピクセルずらしますか?(左なら負の数): ")
+        dy_raw = self._ask("  目印の中心から下へ何ピクセルずらしますか?(上なら負の数): ")
+        try:
+            dx, dy = int(dx_raw), int(dy_raw)
+        except ValueError:
+            print("  数字で入力してください。\n")
+            return
+
+        try:
+            self.browser.click_offset_from_text(text_hint, dx=dx, dy=dy)
+            print(f"  → 実際に '{text_hint}' を目印に、指定した位置をクリックできました。")
+            verify_cfg = self._ask_verification()
+            retry_cfg = self._ask_retry()
+            self.steps.append({
+                "handler": "browser", "action": "click_offset_from_text",
+                "params": {"text_hint": text_hint, "dx": dx, "dy": dy},
+                "verify": verify_cfg, "verify_skip": False,
+                "retry": retry_cfg,
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+
+    def _record_click_text_index(self) -> None:
+        print("  ※ 同じ文字列が画面に複数ある場合に、何番目をクリックするかを")
+        print("     指定します。")
+        try:
+            text_hint = self._ask_target(
+                "  目印にする文字を入力してください(間違えた場合は「キャンセル」): "
+            )
+        except _ActionCancelled:
+            print("  → この操作の記録をキャンセルしました。メニューに戻ります。\n")
+            return
+
+        try:
+            candidates = self.browser.list_elements_by_text(text_hint)
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+            return
+        if not candidates:
+            print(f"  ⚠ '{text_hint}' に一致する、今表示されている要素が見つかりませんでした。\n")
+            return
+        print(f"  '{text_hint}' に一致する要素が{len(candidates)}件見つかりました:")
+        for c in candidates:
+            print(f"    {c['index']}) [{c['tag']}] {c['text']}")
+
+        idx_raw = self._ask("  何番目をクリックしますか?: ")
+        try:
+            index = int(idx_raw)
+        except ValueError:
+            print("  数字で入力してください。\n")
+            return
+
+        try:
+            self.browser.click_by_text_index(text_hint, index)
+            print(f"  → 実際に '{text_hint}' の{index}番目をクリックして確認できました。")
+            verify_cfg = self._ask_verification()
+            retry_cfg = self._ask_retry()
+            obstruction_wait = self._ask_obstruction_wait()
+            self.steps.append({
+                "handler": "browser", "action": "click_by_text_index",
+                "params": {"text_hint": text_hint, "index": index, "obstruction_wait_seconds": obstruction_wait},
+                "verify": verify_cfg, "verify_skip": False,
+                "retry": retry_cfg,
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
 
     def _record_set_download_directory(self) -> None:
         result = self._ask_sluttable_value("ダウンロード先フォルダのパス")
@@ -3119,6 +3208,10 @@ class MacroRecorder:
             print("  10) ウィンドウ位置を指定する(タイトル指定)")
             print("  11) 表示倍率(ズーム)を指定する(キー操作。Webモードでの制御が")
             print("      うまくいかずデスクトップ操作に切り替えた場合等に使う)")
+            print("  12) 登録した画像を基準に、ずらした位置をクリックする")
+            print("      (目印画像の近くにある、目印を持たない場所をクリックしたい場合)")
+            print("  13) 登録した画像2つの間の位置(%)をクリックする")
+            print("      (目印画像が2つ離れて2つあり、その間を狙いたい場合)")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -3145,10 +3238,14 @@ class MacroRecorder:
                 self._record_desktop_set_window_position()
             elif choice == "11":
                 self._record_desktop_set_zoom()
+            elif choice == "12":
+                self._record_desktop_click_offset_image()
+            elif choice == "13":
+                self._record_desktop_click_between_images()
             elif choice == "0":
                 return
             else:
-                print("0〜11のいずれかを入力してください。\n")
+                print("0〜13のいずれかを入力してください。\n")
 
     def _record_desktop_set_zoom(self) -> None:
         print("  ※ 今アクティブなウィンドウ(通常はブラウザ)が対象です。事前に")
@@ -3385,6 +3482,112 @@ class MacroRecorder:
                         "image_path": param_value, "confidence": confidence, "timeout": 10, "region": region,
                     },
                 })
+                print("  → 未確認のまま登録しました。\n")
+            else:
+                print("  → 登録しませんでした。\n")
+
+    def _record_desktop_click_offset_image(self) -> None:
+        print("  ※ クリックしたい場所そのものに目印となる画像が無いが、近くに")
+        print("     目印にできる画像がある場合に使います(例: 見出しアイコンの")
+        print("     右にある無地のボタン)。目印画像が見つかった位置(中心)から")
+        print("     どれだけずれた位置をクリックするかをピクセルで指定します。")
+        result = self._ask_sluttable_value("目印にする画像ファイルのパス")
+        if result is None:
+            print("  → キャンセルしました。\n")
+            return
+        test_value, param_value = result
+
+        dx_raw = self._ask("  目印の中心から右へ何ピクセルずらしますか?(左なら負の数): ")
+        dy_raw = self._ask("  目印の中心から下へ何ピクセルずらしますか?(上なら負の数): ")
+        try:
+            dx, dy = int(dx_raw), int(dy_raw)
+        except ValueError:
+            print("  数字で入力してください。\n")
+            return
+
+        conf_raw = self._ask(
+            "  一致の緩さ(confidence)を0.1〜1.0で指定してください(空Enterで既定値0.8): "
+        )
+        try:
+            confidence = float(conf_raw) if conf_raw else 0.8
+        except ValueError:
+            confidence = 0.8
+        region = self._ask_desktop_region()
+
+        params = {
+            "image_path": param_value, "dx": dx, "dy": dy,
+            "confidence": confidence, "timeout": 10, "region": region,
+        }
+        try:
+            self.desktop.click_offset_from_image(test_value, dx=dx, dy=dy, confidence=confidence, timeout=10, region=region)
+            print("  → 実際に画像を見つけて、指定した位置をクリックできました。")
+            retry_cfg = self._ask_retry()
+            self.steps.append({
+                "handler": "desktop", "action": "click_offset_from_image",
+                "params": params, "retry": retry_cfg,
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}")
+            if self._ask("  それでもこの手順として登録しますか? (y/N): ").lower() == "y":
+                self.steps.append({"handler": "desktop", "action": "click_offset_from_image", "params": params})
+                print("  → 未確認のまま登録しました。\n")
+            else:
+                print("  → 登録しませんでした。\n")
+
+    def _record_desktop_click_between_images(self) -> None:
+        print("  ※ 目印になる画像が2つ離れた位置にあり、その間の決まった位置を")
+        print("     クリックしたい場合に使います(例: 一覧の上端と下端の目印画像から、")
+        print("     間にある特定の行を狙う)。画像Aの位置を0%、画像Bの位置を100%として、")
+        print("     その間の何%の位置をクリックするかを指定します。")
+        result_a = self._ask_sluttable_value("1つ目(基準0%側)の画像ファイルのパス")
+        if result_a is None:
+            print("  → キャンセルしました。\n")
+            return
+        test_a, param_a = result_a
+
+        result_b = self._ask_sluttable_value("2つ目(基準100%側)の画像ファイルのパス")
+        if result_b is None:
+            print("  → キャンセルしました。\n")
+            return
+        test_b, param_b = result_b
+
+        pos_raw = self._ask("  間の何%の位置をクリックしますか?(空Enterで中点=50): ")
+        try:
+            position_percent = float(pos_raw) if pos_raw else 50.0
+        except ValueError:
+            print("  数字で入力してください。\n")
+            return
+
+        conf_raw = self._ask(
+            "  一致の緩さ(confidence)を0.1〜1.0で指定してください(空Enterで既定値0.8): "
+        )
+        try:
+            confidence = float(conf_raw) if conf_raw else 0.8
+        except ValueError:
+            confidence = 0.8
+        region = self._ask_desktop_region()
+
+        params = {
+            "image_path_a": param_a, "image_path_b": param_b, "position_percent": position_percent,
+            "confidence": confidence, "timeout": 10, "region": region,
+        }
+        try:
+            self.desktop.click_between_images(
+                test_a, test_b, position_percent=position_percent,
+                confidence=confidence, timeout=10, region=region,
+            )
+            print("  → 実際に2つの画像を見つけて、指定した位置をクリックできました。")
+            retry_cfg = self._ask_retry()
+            self.steps.append({
+                "handler": "desktop", "action": "click_between_images",
+                "params": params, "retry": retry_cfg,
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}")
+            if self._ask("  それでもこの手順として登録しますか? (y/N): ").lower() == "y":
+                self.steps.append({"handler": "desktop", "action": "click_between_images", "params": params})
                 print("  → 未確認のまま登録しました。\n")
             else:
                 print("  → 登録しませんでした。\n")
