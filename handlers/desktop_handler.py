@@ -32,6 +32,7 @@ import ctypes
 import ctypes.wintypes
 import logging
 import time
+from itertools import groupby
 from pathlib import Path
 
 logger = logging.getLogger("rpa_local_ai.desktop")
@@ -87,6 +88,128 @@ def locate_image_on_screen_once(gui, image_path: str, confidence: float, region=
         area = f"領域{region}内" if region else "画面全体"
         raise ImageNotFoundError(f"{area}に画像が見つかりませんでした: {p}")
     return box
+
+
+# OCRのページ分割モード(PSM)の選択肢。番号ごとの意味はTesseract本体の
+# 定義そのもの。CLI/GUI双方で選択肢として提示するため、番号と日本語の
+# 説明のペアをここで一元管理する。
+OCR_PSM_CHOICES: list[tuple[str, str]] = [
+    ("11", "11: バラバラに散らばった文字を拾う(既定・UIのボタン/ラベル向け)"),
+    ("3", "3: 自動レイアウト解析(文章1ページ向け、Tesseract本来の既定値)"),
+    ("6", "6: まとまった1つのブロックとして扱う"),
+    ("4", "4: 可変サイズの1列のテキストとして扱う"),
+    ("7", "7: 1行の文字列として扱う"),
+    ("8", "8: 1つの単語として扱う"),
+    ("10", "10: 1文字として扱う"),
+    ("12", "12: バラバラに散らばった文字+向き検出"),
+]
+_OCR_DEFAULT_PSM = "11"
+
+
+def _ocr_word_boxes(image, language: str, psm: str = _OCR_DEFAULT_PSM) -> list[dict]:
+    """PIL Imageに対してpytesseractのOCRを実行し、認識できた単語ごとの
+    文字列とバウンディングボックス(画像内のローカル座標)の一覧を返す。
+
+    Tesseractの既定のページ分割モード(PSM 3、文章1ページを想定した
+    自動レイアウト解析)は、デスクトップのスクリーンショット(背景に別の
+    ウィンドウが重なっている等、文章とは違う雑多なレイアウト)に対しては
+    レイアウト解析自体に失敗し、文字が実際にはっきり写っていても
+    何も認識できないことが実機テストで確認された。UIのボタン・ラベルの
+    ような、決まった順序を持たない散らばった文字を拾うのに適した
+    PSM 11(sparse text)をこのツールの既定値としているが、対象に応じて
+    (1行の文字列/1単語/1文字/文章のまとまり等)psm引数で変更できる。
+    """
+    try:
+        import pytesseract
+    except ImportError as e:
+        raise RuntimeError(
+            "OCRでの文字検索には pytesseract が必要です(pip install pytesseract)。"
+            "さらにOS側に Tesseract OCR 本体のインストールが必要です。"
+        ) from e
+    data = pytesseract.image_to_data(
+        image, lang=language, config=f"--psm {psm}", output_type=pytesseract.Output.DICT,
+    )
+    words = []
+    for i in range(len(data["text"])):
+        text = data["text"][i].strip()
+        if not text:
+            continue
+        words.append({
+            "text": text,
+            "left": data["left"][i], "top": data["top"][i],
+            "width": data["width"][i], "height": data["height"][i],
+            "block": data["block_num"][i], "par": data["par_num"][i], "line": data["line_num"][i],
+        })
+    return words
+
+
+def _find_ocr_text_box(words: list[dict], target: str) -> tuple[int, int, int, int] | None:
+    """OCRで得られた単語一覧(words)の中から、targetという文字列に一致する
+    箇所を探し、そのバウンディングボックス(left, top, width, height)を返す。
+    単語単位の完全一致 → 単語への部分一致 → 同じ行内で単語を連結した文字列
+    への部分一致、の順に緩めながら探す(日本語はスペースで分かち書きされて
+    いないため、OCRの単語分割が不安定になりやすく、行単位で連結してからの
+    一致確認まで必要になることが多い)。見つからなければNoneを返す。
+    """
+    target = target.strip()
+    if not target:
+        return None
+    for w in words:
+        if w["text"] == target:
+            return (w["left"], w["top"], w["width"], w["height"])
+    for w in words:
+        if target in w["text"]:
+            return (w["left"], w["top"], w["width"], w["height"])
+
+    def line_key(w):
+        return (w["block"], w["par"], w["line"])
+
+    # 同じ行内の連続した単語を、区切り無し(日本語等の分かち書きされない
+    # 言語向け)と半角スペース区切り(英語等、単語がスペースで区切られる
+    # 言語向け)の両方で連結して試す。一致する最小の連続範囲を採用することで、
+    # 行全体ではなく、targetに対応する部分だけのバウンディングボックスに絞る。
+    for _, group_iter in groupby(sorted(words, key=line_key), key=line_key):
+        group = list(group_iter)
+        n = len(group)
+        best_span = None
+        for i in range(n):
+            for j in range(i + 1, n + 1):
+                sub = group[i:j]
+                nospace = "".join(w["text"] for w in sub)
+                spaced = " ".join(w["text"] for w in sub)
+                if target in nospace or target in spaced:
+                    if best_span is None or (j - i) < (best_span[1] - best_span[0]):
+                        best_span = (i, j)
+                    break  # このiではこれ以上jを伸ばしても範囲が狭くならない
+        if best_span is not None:
+            sub = group[best_span[0]:best_span[1]]
+            left = min(w["left"] for w in sub)
+            top = min(w["top"] for w in sub)
+            right = max(w["left"] + w["width"] for w in sub)
+            bottom = max(w["top"] + w["height"] for w in sub)
+            return (left, top, right - left, bottom - top)
+    return None
+
+
+def locate_text_on_screen_once(
+    gui, text: str, region: tuple[int, int, int, int] | None = None, language: str = "jpn+eng",
+    psm: str = _OCR_DEFAULT_PSM,
+):
+    """画面(regionを指定した場合はその矩形領域内だけ)をOCRでスキャンし、
+    textに一致する文字が見つかった箇所のバウンディングボックス(画面座標系の
+    left, top, width, height)を返す。見つからなければImageNotFoundErrorを送出する。
+    locate_image_on_screen_once同様、DesktopHandler/BrowserHandler両方から
+    共通で使う。
+    """
+    screenshot = gui.screenshot(region=region) if region else gui.screenshot()
+    words = _ocr_word_boxes(screenshot, language, psm)
+    box = _find_ocr_text_box(words, text)
+    if box is None:
+        area = f"領域{region}内" if region else "画面全体"
+        raise ImageNotFoundError(f"{area}にOCRで文字が見つかりませんでした: {text}")
+    lx, ly, lw, lh = box
+    ox, oy = (region[0], region[1]) if region else (0, 0)
+    return (ox + lx, oy + ly, lw, lh)
 
 
 # scroll_until_image_found用: 4方向を試す順番の2パターン。
@@ -483,6 +606,72 @@ class DesktopHandler:
         gui.moveTo(x, y, duration=0.2)
         gui.click(x, y, button=button, clicks=clicks)
         logger.info("座標を直接クリックしました: (%d, %d)", x, y)
+        return f"clicked at: ({x}, {y})"
+
+    def list_ocr_words(
+        self, region: tuple[int, int, int, int] | list[int] | None = None,
+        language: str = "jpn+eng", psm: str = _OCR_DEFAULT_PSM,
+    ) -> list[dict]:
+        """画面(regionを指定した場合はその矩形領域内だけ)を実際にOCRで読み取り、
+        認識できた単語(またはひとまとまりの文字)とその位置(画面座標)の
+        一覧を返す。「探したい文字」を登録する前に、実際にどう読み取られるか
+        (想定した文字列どおりか、途中で分割されていないか、そもそも
+        文字として認識されているか)を確認するための診断用。
+        """
+        gui = self._gui()
+        norm_region = self._normalize_region(region)
+        screenshot = gui.screenshot(region=norm_region) if norm_region else gui.screenshot()
+        words = _ocr_word_boxes(screenshot, language, psm)
+        ox, oy = (norm_region[0], norm_region[1]) if norm_region else (0, 0)
+        return [
+            {"text": w["text"], "x": ox + w["left"], "y": oy + w["top"], "width": w["width"], "height": w["height"]}
+            for w in words
+        ]
+
+    def _locate_text_ocr(
+        self, text: str, region: tuple[int, int, int, int] | list[int] | None,
+        language: str, timeout: float, psm: str = _OCR_DEFAULT_PSM,
+    ):
+        gui = self._gui()
+        norm_region = self._normalize_region(region)
+        deadline = time.monotonic() + timeout
+        last_err: ImageNotFoundError | None = None
+        while True:
+            try:
+                return locate_text_on_screen_once(gui, text, norm_region, language, psm)
+            except ImageNotFoundError as e:
+                last_err = e
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.5)
+        raise last_err
+
+    def click_text_ocr(
+        self, text: str, dx: int = 0, dy: int = 0,
+        region: tuple[int, int, int, int] | list[int] | None = None,
+        language: str = "jpn+eng", timeout: float = 10,
+        button: str = "left", clicks: int = 1, psm: str = _OCR_DEFAULT_PSM,
+    ) -> str:
+        """画面(regionを指定した場合はその矩形領域内だけ)をOCRでスキャンし、
+        textに一致する文字が見つかった位置の中心(dx/dyを指定した場合は
+        そこからずらした位置)をクリックする。DOM上で文字を検索できない
+        canvas描画・画像化されたボタン等の要素向け(locate_and_click/
+        click_offset_from_imageの画像版に対する、文字版に相当する)。
+
+        region省略時は画面全体を対象にするが、OCRは画面全体だと遅く・
+        誤検出(他の似た文字列に一致してしまう)しやすいため、対象が
+        おおよそどのあたりにあるか分かっている場合はregionで絞り込むことを
+        推奨する。language は pytesseract の言語コード(既定は日本語+英語)。
+        psm はTesseractのページ分割モード(OCR_PSM_CHOICES参照。既定は
+        UIのボタン/ラベル等の散らばった文字向けの11)。
+        """
+        gui = self._gui()
+        box = self._locate_text_ocr(text, region, language, timeout, psm)
+        center = gui.center(box)
+        x, y = center.x + dx, center.y + dy
+        gui.moveTo(x, y, duration=0.2)
+        gui.click(x, y, button=button, clicks=clicks)
+        logger.info("OCRで文字を見つけてクリックしました: '%s' -> (%d, %d)", text, x, y)
         return f"clicked at: ({x}, {y})"
 
     def _scroll_step(self, gui, direction: str, amount: int) -> None:

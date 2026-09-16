@@ -928,6 +928,57 @@ class BrowserHandler:
             f"4方向にスクロールしましたが、画像が見つかりませんでした: {image_path}"
         )
 
+    def click_text_ocr(
+        self, text: str, dx: int = 0, dy: int = 0,
+        region: tuple[int, int, int, int] | list[int] | None = None,
+        language: str = "jpn+eng", timeout: float = 10,
+        button: str = "left", clicks: int = 1, psm: str = "11",
+    ) -> str:
+        """画面(regionを指定した場合はその矩形領域内だけ)をOCRでスキャンし、
+        textに一致する文字が見つかった位置の中心(dx/dyを指定した場合は
+        そこからずらした位置)をクリックする。DOM/表示テキストでは検索
+        できないcanvas描画・画像化された文字等の要素向けに、実際に画面に
+        映った見た目をスクリーンショットでOCRする(デスクトップ操作の
+        click_text_ocr等と同じ仕組みを使うため、pytesseractとOS側の
+        Tesseract OCR本体が必要)。
+
+        region省略時は画面全体を対象にするが、OCRは画面全体だと遅く・
+        誤検出しやすいため、対象がおおよそどのあたりにあるか分かっている
+        場合はregionで絞り込むことを推奨する。psm はTesseractのページ
+        分割モード(desktop_handler.OCR_PSM_CHOICES参照。既定はUIの
+        ボタン/ラベル等の散らばった文字向けの11)。
+        """
+        from handlers.desktop_handler import (
+            ImageNotFoundError as _ImageNotFoundError,
+            _import_pyautogui,
+            locate_text_on_screen_once,
+        )
+
+        gui = _import_pyautogui()
+        norm_region = tuple(int(v) for v in region) if region else None
+
+        self._assert_still_on_site()
+        deadline = time.monotonic() + timeout
+        last_err: _ImageNotFoundError | None = None
+        box = None
+        while True:
+            try:
+                box = locate_text_on_screen_once(gui, text, norm_region, language, psm)
+                break
+            except _ImageNotFoundError as e:
+                last_err = e
+            if time.monotonic() >= deadline:
+                raise last_err
+            time.sleep(0.5)
+
+        center = gui.center(box)
+        x, y = center.x + dx, center.y + dy
+        gui.moveTo(x, y, duration=0.2)
+        gui.click(x, y, button=button, clicks=clicks)
+        self._assert_still_on_site()
+        logger.info("OCRで文字を見つけてクリックしました: '%s' -> (%d, %d)", text, x, y)
+        return f"clicked at: ({x}, {y})"
+
     def _click_with_obstruction_wait(
         self,
         driver,

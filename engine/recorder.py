@@ -48,7 +48,7 @@ from handlers.browser_handler import (
 from handlers.excel_handler import ExcelHandler
 from handlers.explorer_handler import ExplorerHandler
 from handlers.pdf_handler import PdfHandler
-from handlers.desktop_handler import DesktopHandler
+from handlers.desktop_handler import OCR_PSM_CHOICES, DesktopHandler
 from handlers.list_handler import ListHandler
 from handlers.process_handler import ProcessHandler
 from handlers.text_handler import TextHandler
@@ -1866,6 +1866,8 @@ class MacroRecorder:
             print("  25) 画像が見つかるまでスクロールして探す")
             print("      (DOM/文字では見つけにくい要素向け。見つけたらクリックするか")
             print("      移動するだけかを選べる)")
+            print("  26) 画面をOCRで読み取って文字を探してクリックする")
+            print("      (canvas描画等、DOM/表示テキストでは見つけにくい要素向け)")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -1920,10 +1922,12 @@ class MacroRecorder:
                 self._record_click_text_index()
             elif choice == "25":
                 self._record_web_scroll_until_image_found()
+            elif choice == "26":
+                self._record_web_click_text_ocr()
             elif choice == "0":
                 return
             else:
-                print("0〜25のいずれかを入力してください。\n")
+                print("0〜26のいずれかを入力してください。\n")
 
     def _record_click_offset_text(self) -> None:
         print("  ※ 目印にしたい文字自体はクリック対象ではなく、その近くにある")
@@ -2058,6 +2062,46 @@ class MacroRecorder:
             retry_cfg = self._ask_retry()
             self.steps.append({
                 "handler": "browser", "action": "scroll_until_image_found",
+                "params": params, "retry": retry_cfg,
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+
+    def _record_web_click_text_ocr(self) -> None:
+        print("  ※ DOM/表示テキストでは見つけにくい要素(canvas描画・画像化された")
+        print("     文字等)向けに、画面を実際にOCRで読み取って文字を探します。")
+        print("     見つけた位置(ずらす量を指定すればそこから移動した位置)を")
+        print("     クリックします。")
+        result = self._ask_sluttable_value("探したい文字")
+        if result is None:
+            print("  → キャンセルしました。\n")
+            return
+        test_value, param_value = result
+
+        dx_raw = self._ask("  見つけた位置からX方向にずらす量(右がプラス。空Enterで0): ").strip()
+        dy_raw = self._ask("  見つけた位置からY方向にずらす量(下がプラス。空Enterで0): ").strip()
+        try:
+            dx = int(dx_raw) if dx_raw else 0
+            dy = int(dy_raw) if dy_raw else 0
+        except ValueError:
+            dx = dy = 0
+
+        lang_raw = self._ask("  OCRの言語を入力してください(空Enterで既定値 'jpn+eng'): ").strip()
+        language = lang_raw or "jpn+eng"
+        psm = self._ask_ocr_psm()
+        region = self._ask_desktop_region()
+
+        params = {
+            "text": param_value, "dx": dx, "dy": dy,
+            "region": region, "language": language, "psm": psm,
+        }
+        try:
+            self.browser.click_text_ocr(test_value, dx=dx, dy=dy, region=region, language=language, psm=psm)
+            print("  → 実際にOCRで文字を見つけて、指定した位置をクリックできました。")
+            retry_cfg = self._ask_retry()
+            self.steps.append({
+                "handler": "browser", "action": "click_text_ocr",
                 "params": params, "retry": retry_cfg,
             })
             print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
@@ -3277,6 +3321,8 @@ class MacroRecorder:
             print("  14) 画像が見つかるまでスクロールして探す")
             print("      (見つけたらクリックするか、移動するだけかを選べる)")
             print("  15) 指定した秒数だけ待機する")
+            print("  16) 画面をOCRで読み取って文字を探してクリックする")
+            print("      (画像に写っている文字等、画像検索では扱いにくい要素向け)")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -3311,10 +3357,12 @@ class MacroRecorder:
                 self._record_desktop_scroll_until_image_found()
             elif choice == "15":
                 self._record_wait()
+            elif choice == "16":
+                self._record_desktop_click_text_ocr()
             elif choice == "0":
                 return
             else:
-                print("0〜15のいずれかを入力してください。\n")
+                print("0〜16のいずれかを入力してください。\n")
 
     def _record_desktop_set_zoom(self) -> None:
         print("  ※ 今アクティブなウィンドウ(通常はブラウザ)が対象です。事前に")
@@ -3493,6 +3541,26 @@ class MacroRecorder:
             print("  数字で入力してください。画面全体を対象にします。\n")
             return None
         return [left, top, width, height]
+
+    def _ask_ocr_psm(self) -> str:
+        """OCR(Tesseract)のページ分割モード(PSM)を選ばせる。対象の見た目
+        (ボタン等の散らばった文字/1行のラベル/1単語だけ 等)によって
+        認識精度が変わるため選択式にしている。
+        """
+        print("  OCRの読み取り方式(ページ分割モード)を選んでください:")
+        for i, (_value, label) in enumerate(OCR_PSM_CHOICES, start=1):
+            print(f"    {i}) {label}")
+        choice = self._ask(f"  番号(空Enterで1: 既定値{OCR_PSM_CHOICES[0][0]}): ").strip()
+        if not choice:
+            return OCR_PSM_CHOICES[0][0]
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(OCR_PSM_CHOICES):
+                return OCR_PSM_CHOICES[idx][0]
+        except ValueError:
+            pass
+        print("  番号が正しくないため既定値を使います。")
+        return OCR_PSM_CHOICES[0][0]
 
     def _record_desktop_screenshot(self) -> None:
         result = self._ask_sluttable_value("保存先の画像パス")
@@ -3720,6 +3788,53 @@ class MacroRecorder:
             if self._ask("  それでもこの手順として登録しますか? (y/N): ").lower() == "y":
                 self.steps.append({
                     "handler": "desktop", "action": "scroll_until_image_found", "params": params,
+                })
+                print("  → 未確認のまま登録しました。\n")
+            else:
+                print("  → 登録しませんでした。\n")
+
+    def _record_desktop_click_text_ocr(self) -> None:
+        print("  ※ 画像検索では扱いにくい、画像に写っている文字(スクリーン")
+        print("     ショットに埋め込まれた文字等)向けに、画面を実際にOCRで")
+        print("     読み取って文字を探します。見つけた位置(ずらす量を指定")
+        print("     すればそこから移動した位置)をクリックします。")
+        result = self._ask_sluttable_value("探したい文字")
+        if result is None:
+            print("  → キャンセルしました。\n")
+            return
+        test_value, param_value = result
+
+        dx_raw = self._ask("  見つけた位置からX方向にずらす量(右がプラス。空Enterで0): ").strip()
+        dy_raw = self._ask("  見つけた位置からY方向にずらす量(下がプラス。空Enterで0): ").strip()
+        try:
+            dx = int(dx_raw) if dx_raw else 0
+            dy = int(dy_raw) if dy_raw else 0
+        except ValueError:
+            dx = dy = 0
+
+        lang_raw = self._ask("  OCRの言語を入力してください(空Enterで既定値 'jpn+eng'): ").strip()
+        language = lang_raw or "jpn+eng"
+        psm = self._ask_ocr_psm()
+        region = self._ask_desktop_region()
+
+        params = {
+            "text": param_value, "dx": dx, "dy": dy,
+            "region": region, "language": language, "psm": psm,
+        }
+        try:
+            self.desktop.click_text_ocr(test_value, dx=dx, dy=dy, region=region, language=language, psm=psm)
+            print("  → 実際にOCRで文字を見つけて、指定した位置をクリックできました。")
+            retry_cfg = self._ask_retry()
+            self.steps.append({
+                "handler": "desktop", "action": "click_text_ocr",
+                "params": params, "retry": retry_cfg,
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}")
+            if self._ask("  それでもこの手順として登録しますか? (y/N): ").lower() == "y":
+                self.steps.append({
+                    "handler": "desktop", "action": "click_text_ocr", "params": params,
                 })
                 print("  → 未確認のまま登録しました。\n")
             else:

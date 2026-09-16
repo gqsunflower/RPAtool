@@ -31,6 +31,49 @@ from typing import Any
 
 from openpyxl.utils import column_index_from_string, get_column_letter
 
+# Windowsのディスプレイ拡大率(125%等)が設定されていると、DPI非対応の
+# アプリは実際の物理ピクセルではなく「仮想化されて縮小された」座標系で
+# 動いてしまう(例: 実際は1920x1200の画面が、Tkinterからは1536x960に
+# 見える)。RegionPicker(画面をドラッグして領域選択する機能)はTkinterの
+# winfo_screenwidth/heightを実際の画面サイズとして使うため、この状態だと
+# オーバーレイが画面の一部にしか表示されなくなる(実機で確認された不具合)。
+# pyautoguiは物理ピクセルで動作するため、Tkinter側もプロセス起動時点で
+# DPI対応を明示的に宣言し、物理ピクセルで座標を扱うようにしておく
+# (tk.Tk()を最初に生成するより前に済ませる必要があるため、モジュール
+# 読み込み時点で実行する)。
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+    except Exception:  # noqa: BLE001
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _windows_dpi_scale() -> float:
+    """Windowsのディスプレイ拡大率(125%なら1.25)を返す(取得できなければ1.0)。
+
+    DPI対応を宣言した(上記)ことで、Tkinterのウィンドウは実際の物理ピクセル
+    で描画されるようになった。これ自体はRegionPickerの座標ズレを直すのに
+    必要だったが、副作用として、ウィンドウのgeometryに固定のピクセル数
+    (例: "1140x760")を指定している箇所は、以前はWindows側が拡大率分だけ
+    自動で見た目を拡大してくれていたのに対し、DPI対応後は本当にその
+    ピクセル数のまま(=画面上ではより小さく)表示されるようになり、結果
+    として長いラベルやプルダウンの文字が枠からはみ出して見えなくなる
+    (実機で確認された不具合)。ウィンドウサイズを決める際はこの拡大率を
+    掛けて、以前と同じ見た目上の大きさになるようにする。
+    """
+    if sys.platform != "win32":
+        return 1.0
+    try:
+        dpi = ctypes.windll.user32.GetDpiForSystem()
+        return dpi / 96.0
+    except Exception:  # noqa: BLE001
+        return 1.0
+
+
 _NO_VALUE = object()  # register_stepでvalue未指定を表す番人値(Noneも正当な値のため)
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -67,7 +110,7 @@ from handlers.browser_handler import (  # noqa: E402
     ElementNotFoundError,
     SiteNotWhitelistedError,
 )
-from handlers.desktop_handler import ImageNotFoundError  # noqa: E402
+from handlers.desktop_handler import OCR_PSM_CHOICES, ImageNotFoundError  # noqa: E402
 from handlers.explorer_handler import PathConflictError  # noqa: E402
 from handlers.process_handler import ScriptNotWhitelistedError  # noqa: E402
 
@@ -125,7 +168,7 @@ DOMAIN_ACTIONS = {
         "1段階だけ親フレームに戻る",
         "ダウンロード先フォルダを指定する", "ダウンロードの完了を待つ",
         "文字を基準にずらした位置をクリックする", "同じ文字列が複数ある時に番号で指定してクリックする",
-        "画像が見つかるまでスクロールして探す",
+        "画像が見つかるまでスクロールして探す", "OCRで文字を探してクリックする",
     ],
     "explorer": [
         "パスを開く", "フォルダを作成する", "ファイルを移動する", "ファイルをコピーする",
@@ -142,7 +185,7 @@ DOMAIN_ACTIONS = {
         "ウィンドウサイズを指定する(タイトル指定)", "ウィンドウ位置を指定する(タイトル指定)",
         "表示倍率(ズーム)を指定する(キー操作)",
         "画像を基準にずらした位置をクリックする", "画像2つの間の位置(%)をクリックする",
-        "画像が見つかるまでスクロールして探す", "待機する",
+        "画像が見つかるまでスクロールして探す", "待機する", "OCRで文字を探してクリックする",
     ],
     "text": [
         "文字を探して切り出す", "文字を置換する", "日付・時刻を取得する",
@@ -254,7 +297,11 @@ class ValueSlotField(ttk.Frame):
 
     def __init__(self, parent, label: str, width: int = 40):
         super().__init__(parent)
-        ttk.Label(self, text=label, width=22, anchor="w").grid(row=0, column=0, sticky="w")
+        # ラベルに固定文字数幅(width)を指定すると、全角文字主体の長いラベルが
+        # 枠内に収まりきらず見切れてしまう(半角基準の文字数カウントのため)。
+        # 自然な文字列幅で表示することで、どんな長さのラベルでも見切れない
+        # ようにする(列の位置は多少ラベル長によってばらつくが、可読性を優先)。
+        ttk.Label(self, text=label, anchor="w").grid(row=0, column=0, sticky="w")
         self.value_var = tk.StringVar()
         self.entry = ttk.Entry(self, textvariable=self.value_var, width=width)
         self.entry.grid(row=0, column=1, padx=4, sticky="we")
@@ -332,7 +379,8 @@ class PlainField(ttk.Frame):
 
     def __init__(self, parent, label: str, width: int = 20, default: str = "", is_path: bool = False):
         super().__init__(parent)
-        ttk.Label(self, text=label, width=30, anchor="w").grid(row=0, column=0, sticky="w")
+        # ValueSlotFieldと同じ理由で、ラベルは固定文字数幅にせず自然な幅で表示する。
+        ttk.Label(self, text=label, anchor="w").grid(row=0, column=0, sticky="w")
         self.var = tk.StringVar(value=default)
         self.entry = ttk.Entry(self, textvariable=self.var, width=width)
         self.entry.grid(row=0, column=1, sticky="w")
@@ -359,11 +407,103 @@ class BoolField(ttk.Frame):
         return self.var.get()
 
 
+class PsmField(ttk.Frame):
+    """OCR(Tesseract)のページ分割モード(PSM)を選ぶプルダウン。番号+説明を
+    表示し、get()はTesseractに渡す番号の文字列(例: "11")を返す。
+    """
+
+    def __init__(self, parent, label: str = "OCRの読み取り方式(ページ分割モード)", default: str = "11"):
+        super().__init__(parent)
+        ttk.Label(self, text=label, anchor="w").grid(row=0, column=0, sticky="w")
+        self._label_to_value = {choice_label: value for value, choice_label in OCR_PSM_CHOICES}
+        self.var = tk.StringVar()
+        combo = ttk.Combobox(
+            self, textvariable=self.var, state="readonly", width=48,
+            values=[choice_label for _, choice_label in OCR_PSM_CHOICES],
+        )
+        combo.grid(row=0, column=1, sticky="we")
+        default_label = next(
+            (choice_label for value, choice_label in OCR_PSM_CHOICES if value == default),
+            OCR_PSM_CHOICES[0][1],
+        )
+        self.var.set(default_label)
+
+    def get(self) -> str:
+        return self._label_to_value.get(self.var.get(), OCR_PSM_CHOICES[0][0])
+
+
+class RegionPicker(tk.Toplevel):
+    """スクリーンショットツールのように、実際の画面全体を半透明でおおい、
+    ドラッグした矩形をそのまま領域として選択させるオーバーレイウィンドウ。
+    ドラッグして選択が終わると on_select(left, top, width, height) を
+    (画面座標・ピクセル単位で)呼んでから自分自身を閉じる。Escキーまたは
+    ドラッグせずに閉じた場合はon_selectを呼ばずに閉じる(キャンセル)。
+    """
+
+    def __init__(self, parent, on_select):
+        super().__init__(parent)
+        self.on_select = on_select
+        self.overrideredirect(True)
+        self.attributes("-alpha", 0.35)
+        self.attributes("-topmost", True)
+        self.config(bg="black")
+        self.geometry(f"{self.winfo_screenwidth()}x{self.winfo_screenheight()}+0+0")
+
+        self.canvas = tk.Canvas(self, bg="black", highlightthickness=0, cursor="cross")
+        self.canvas.pack(fill="both", expand=True)
+        self._start: tuple[int, int] | None = None
+        self._rect_id: int | None = None
+
+        ttk.Label(
+            self.canvas, text="ドラッグして範囲を選択してください(Escキーでキャンセル)",
+            background="#ffff88", foreground="#222", padding=6,
+        ).place(x=20, y=20)
+
+        self.canvas.bind("<ButtonPress-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.focus_force()
+
+    def _on_press(self, event) -> None:
+        self._start = (event.x, event.y)
+        self._rect_id = self.canvas.create_rectangle(
+            event.x, event.y, event.x, event.y, outline="#f33", width=2,
+        )
+
+    def _on_drag(self, event) -> None:
+        if self._rect_id is None or self._start is None:
+            return
+        x0, y0 = self._start
+        self.canvas.coords(self._rect_id, x0, y0, event.x, event.y)
+
+    def _on_release(self, event) -> None:
+        start = self._start
+        self._start = None
+        if start is None:
+            self.destroy()
+            return
+        x0, y0 = start
+        x1, y1 = event.x, event.y
+        left, top = min(x0, x1), min(y0, y1)
+        width, height = abs(x1 - x0), abs(y1 - y0)
+        # このウィンドウは画面全体を覆っていて自身は(0,0)に配置しているため、
+        # canvas上のローカル座標がそのまま画面座標として扱える
+        # (念のためwinfo_rootx/rootyを足しておく)。
+        screen_left = self.winfo_rootx() + left
+        screen_top = self.winfo_rooty() + top
+        self.destroy()
+        if width > 2 and height > 2:  # ドラッグせずクリックしただけの誤操作は無視する
+            self.on_select(int(screen_left), int(screen_top), int(width), int(height))
+
+
 class RegionField(ttk.Frame):
     """画像検索・スクリーンショット等で使う「検索範囲を画面全体か特定領域に
     絞るか」の入力欄。左端X/上端Y/幅/高さの数字を変えるたびに、画面全体を
     縮小したイメージ図の中でどのあたりが範囲になるかを赤枠でプレビュー表示する
-    (数字だけでは範囲の見当がつけにくいため)。
+    (数字だけでは範囲の見当がつけにくいため)。「画面をドラッグして選択...」
+    ボタンから、実際の画面をスクリーンショットツールのようにドラッグして
+    選択することで、4つの数字を自動入力することもできる。
     """
 
     CANVAS_W = 220
@@ -393,6 +533,10 @@ class RegionField(ttk.Frame):
         self.height_field.pack(fill="x", pady=2)
         for field in (self.left_field, self.top_field, self.width_field, self.height_field):
             field.var.trace_add("write", lambda *_: self._redraw())
+
+        ttk.Button(
+            self, text="画面をドラッグして選択...", command=self._pick_region_by_drag,
+        ).pack(anchor="w", pady=(2, 4))
 
         self.canvas = tk.Canvas(
             self, width=self.CANVAS_W, height=self.CANVAS_H,
@@ -427,6 +571,34 @@ class RegionField(ttk.Frame):
         self.canvas.create_rectangle(rx0, ry0, rx1, ry1, outline="#d33", fill="#f99", stipple="gray50")
         self.info_label.config(text=f"({left},{top}) から 幅{width}×高さ{height}px の範囲を検索します")
 
+    def _pick_region_by_drag(self) -> None:
+        """アプリのウィンドウを一時的に隠し、実際の画面をドラッグして矩形を
+        選択させ(RegionPicker)、選択結果を4つの入力欄へ自動入力する。
+        """
+        root = self.winfo_toplevel()
+        root.withdraw()
+        root.update()
+        time.sleep(0.3)  # ウィンドウが実際に消えるまでの猶予
+
+        result: dict = {}
+
+        def on_selected(left: int, top: int, width: int, height: int) -> None:
+            result["region"] = (left, top, width, height)
+
+        picker = RegionPicker(root, on_select=on_selected)
+        root.wait_window(picker)
+
+        root.deiconify()
+        root.lift()
+
+        if "region" in result:
+            left, top, width, height = result["region"]
+            self.enabled_field.var.set(True)
+            self.left_field.var.set(str(left))
+            self.top_field.var.set(str(top))
+            self.width_field.var.set(str(width))
+            self.height_field.var.set(str(height))
+
     def get_region(self) -> list[int] | None:
         """有効チェックが入っていなければNone(画面全体)。有効な場合は
         [left, top, width, height] を返す(数字でなければValueErrorを送出)。
@@ -444,7 +616,7 @@ class ImagePasteField(ttk.Frame):
 
     def __init__(self, parent, label: str):
         super().__init__(parent)
-        ttk.Label(self, text=label, width=22, anchor="w").grid(row=0, column=0, sticky="w")
+        ttk.Label(self, text=label, anchor="w").grid(row=0, column=0, sticky="w")
         self.value_var = tk.StringVar()
         self.entry = ttk.Entry(self, textvariable=self.value_var, width=40)
         self.entry.grid(row=0, column=1, padx=4)
@@ -693,8 +865,13 @@ class RecorderApp(_AppBase):
     def __init__(self, browser: str = "chrome"):
         super().__init__()
         self.title("疑似ローカルAI — 操作の登録 (GUI)")
-        self.geometry("1140x760")
-        self.minsize(900, 500)
+        # DPI対応化(_windows_dpi_scale参照)により、以前はWindowsが自動で
+        # 拡大表示してくれていた分を、ここで明示的に拡大率倍しておく
+        # (そうしないと、以前と同じ見た目の大きさにならず、長いラベルや
+        # プルダウンの文字が枠内に収まりきらなくなる)。
+        scale = _windows_dpi_scale()
+        self.geometry(f"{int(1140 * scale)}x{int(760 * scale)}")
+        self.minsize(int(900 * scale), int(500 * scale))
 
         self.recorder = MacroRecorder(CONFIG_DIR, browser=browser)
         self.base_step_count = 0
@@ -796,8 +973,41 @@ class RecorderApp(_AppBase):
         ttk.Button(bottom, text="保存して終了", command=self._finish).pack(side="right")
         ttk.Button(bottom, text="中止(保存しない)", command=self._cancel_all).pack(side="right", padx=6)
 
-        self.form_frame = ttk.LabelFrame(left, text="入力", padding=10)
-        self.form_frame.pack(fill="x")
+        # フォーム内容が長い操作(OCR文字検索の領域指定+一覧表示等)だと、
+        # 固定サイズのウィンドウの表示領域から下にあふれて、スクロールする
+        # 手段が無いままボタンごと見えなくなってしまう問題があったため、
+        # フォーム部分だけCanvas+Scrollbarでスクロール可能にしておく
+        # (ウィンドウ最下部の「保存して終了」等のボタン自体は、そちらとは
+        # 別に既にside="bottom"で常に見える位置に固定してある)。
+        form_outer = ttk.LabelFrame(left, text="入力", padding=0)
+        form_outer.pack(fill="x")
+
+        form_canvas = tk.Canvas(form_outer, height=320, highlightthickness=0)
+        form_scrollbar = ttk.Scrollbar(form_outer, orient="vertical", command=form_canvas.yview)
+        form_canvas.configure(yscrollcommand=form_scrollbar.set)
+        form_canvas.pack(side="left", fill="both", expand=True)
+        form_scrollbar.pack(side="right", fill="y")
+
+        self.form_frame = ttk.Frame(form_canvas, padding=10)
+        form_window_id = form_canvas.create_window((0, 0), window=self.form_frame, anchor="nw")
+
+        def _sync_form_scrollregion(_event=None):
+            form_canvas.configure(scrollregion=form_canvas.bbox("all"))
+
+        def _sync_form_width(event):
+            form_canvas.itemconfigure(form_window_id, width=event.width)
+
+        self.form_frame.bind("<Configure>", _sync_form_scrollregion)
+        form_canvas.bind("<Configure>", _sync_form_width)
+
+        def _on_form_mousewheel(event):
+            form_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        # マウスホイールは、カーソルがこのCanvas上にある間だけbind_allする
+        # (常時bind_allすると、ログ欄やリストボックス等、他のスクロール可能な
+        # ウィジェット上でのホイール操作まで奪ってしまうため)。
+        form_canvas.bind("<Enter>", lambda _e: form_canvas.bind_all("<MouseWheel>", _on_form_mousewheel))
+        form_canvas.bind("<Leave>", lambda _e: form_canvas.unbind_all("<MouseWheel>"))
 
         log_frame = ttk.LabelFrame(left, text="ログ(実行結果・エラー)", padding=4)
         log_frame.pack(fill="both", expand=False, pady=4)
@@ -3592,6 +3802,101 @@ class RecorderApp(_AppBase):
 
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
+        elif action == "OCRで文字を探してクリックする":
+            ttk.Label(
+                f, text="DOM/表示テキストでは見つけにくい要素(canvas描画・画像化された文字等)"
+                "向けに、画面を実際にOCRで読み取って文字を探します。見つけた位置"
+                "(ずらす量を指定すればそこから移動した位置)をクリックします。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
+            text_field = ValueSlotField(f, "探したい文字")
+            text_field.pack(fill="x", pady=4)
+            dx_field = PlainField(f, "見つけた位置からX方向のずれ(右がプラス)", default="0")
+            dx_field.pack(fill="x", pady=2)
+            dy_field = PlainField(f, "見つけた位置からY方向のずれ(下がプラス)", default="0")
+            dy_field.pack(fill="x", pady=2)
+            lang_field = PlainField(f, "OCRの言語", default="jpn+eng")
+            lang_field.pack(fill="x", pady=4)
+            psm_field = PsmField(f)
+            psm_field.pack(fill="x", pady=4)
+            region_field = RegionField(f, self.recorder.desktop, "検索範囲を画面全体ではなく特定の領域に絞る")
+            region_field.pack(fill="x", pady=2)
+
+            ttk.Label(
+                f, text="OCRの認識精度は文字の大きさ・背景によって左右されます。"
+                "「探したい文字」を入力する前に、下のボタンで実際にこの領域から"
+                "OCRで読み取れる文字を確認できます。",
+                foreground="#886", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(8, 2))
+            ocr_words_listbox = tk.Listbox(f, height=6, width=75)
+            ocr_words_listbox.pack(fill="x", pady=(0, 4))
+
+            def on_list_ocr_words():
+                language = lang_field.get().strip() or "jpn+eng"
+                psm = psm_field.get()
+                try:
+                    region = region_field.get_region()
+                except ValueError:
+                    self.log("⚠ 領域は数字で入力してください")
+                    return
+                ocr_words_listbox.delete(0, "end")
+                try:
+                    words = self._run_screen_search_hidden(
+                        self.recorder.desktop.list_ocr_words, region=region, language=language, psm=psm,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+                    return
+                if not words:
+                    ocr_words_listbox.insert("end", "(この領域からは何も認識できませんでした)")
+                else:
+                    for w in words:
+                        ocr_words_listbox.insert("end", f"「{w['text']}」  (x={w['x']}, y={w['y']})")
+                self.log(f"→ {len(words)}件の文字を認識しました")
+
+            ttk.Button(
+                f, text="この領域で読み取れる文字を確認", command=on_list_ocr_words,
+            ).pack(anchor="w", pady=(0, 6))
+
+            def on_submit():
+                text_test, text_param, _ = text_field.get()
+                if not text_test:
+                    self.log("⚠ 探したい文字を入力してください")
+                    return
+                try:
+                    dx = int(dx_field.get() or "0")
+                    dy = int(dy_field.get() or "0")
+                except ValueError:
+                    self.log("⚠ ずらす量は数字で入力してください")
+                    return
+                language = lang_field.get().strip() or "jpn+eng"
+                psm = psm_field.get()
+                try:
+                    region = region_field.get_region()
+                except ValueError:
+                    self.log("⚠ 領域は数字で入力してください")
+                    return
+
+                params = {
+                    "text": text_param, "dx": dx, "dy": dy,
+                    "region": region, "language": language, "psm": psm,
+                }
+                try:
+                    self._run_screen_search_hidden(
+                        self.recorder.browser.click_text_ocr,
+                        text_test, dx=dx, dy=dy, region=region, language=language, psm=psm,
+                    )
+                    self.log("→ 実際にOCRで文字を見つけて、指定した位置をクリックできました")
+                    retry_cfg = self._ask_retry()
+                    self.register_step({
+                        "handler": "browser", "action": "click_text_ocr",
+                        "params": params, "retry": retry_cfg,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
     def _build_web_index_kind(self, parent: ttk.Frame, kind: str) -> None:
         """番号指定操作の一覧プレビュー(Listbox)+ 種類ごとの入力欄 + 登録ボタンを作る。"""
         listbox = tk.Listbox(parent, height=8, width=75)
@@ -4544,6 +4849,109 @@ class RecorderApp(_AppBase):
                 self.log(f"→ {seconds}秒の待機を登録しました")
 
             ttk.Button(f, text="登録", command=on_submit).pack(pady=6)
+
+        elif action == "OCRで文字を探してクリックする":
+            ttk.Label(
+                f, text="画像検索では扱いにくい、画像に写っている文字(スクリーンショットに"
+                "埋め込まれた文字等)向けに、画面を実際にOCRで読み取って文字を探します。"
+                "見つけた位置(ずらす量を指定すればそこから移動した位置)をクリックします。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
+            text_field = PlainField(f, "探したい文字")
+            text_field.pack(fill="x", pady=4)
+            dx_field = PlainField(f, "見つけた位置からX方向のずれ(右がプラス)", default="0")
+            dx_field.pack(fill="x", pady=2)
+            dy_field = PlainField(f, "見つけた位置からY方向のずれ(下がプラス)", default="0")
+            dy_field.pack(fill="x", pady=2)
+            lang_field = PlainField(f, "OCRの言語", default="jpn+eng")
+            lang_field.pack(fill="x", pady=4)
+            psm_field = PsmField(f)
+            psm_field.pack(fill="x", pady=4)
+            slot_field = PlainField(f, "文字をスロットにする場合のスロット名(任意)")
+            slot_field.pack(fill="x", pady=4)
+            region_field = RegionField(f, self.recorder.desktop, "検索範囲を画面全体ではなく特定の領域に絞る")
+            region_field.pack(fill="x", pady=2)
+
+            ttk.Label(
+                f, text="OCRの認識精度は文字の大きさ・背景によって左右されます。"
+                "「探したい文字」を入力する前に、下のボタンで実際にこの領域から"
+                "OCRで読み取れる文字を確認できます。",
+                foreground="#886", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(8, 2))
+            ocr_words_listbox = tk.Listbox(f, height=6, width=75)
+            ocr_words_listbox.pack(fill="x", pady=(0, 4))
+
+            def on_list_ocr_words():
+                language = lang_field.get().strip() or "jpn+eng"
+                psm = psm_field.get()
+                try:
+                    region = region_field.get_region()
+                except ValueError:
+                    self.log("⚠ 領域は数字で入力してください")
+                    return
+                ocr_words_listbox.delete(0, "end")
+                try:
+                    words = self._run_screen_search_hidden(
+                        self.recorder.desktop.list_ocr_words, region=region, language=language, psm=psm,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+                    return
+                if not words:
+                    ocr_words_listbox.insert("end", "(この領域からは何も認識できませんでした)")
+                else:
+                    for w in words:
+                        ocr_words_listbox.insert("end", f"「{w['text']}」  (x={w['x']}, y={w['y']})")
+                self.log(f"→ {len(words)}件の文字を認識しました")
+
+            ttk.Button(
+                f, text="この領域で読み取れる文字を確認", command=on_list_ocr_words,
+            ).pack(anchor="w", pady=(0, 6))
+
+            def on_submit():
+                text_value = text_field.get()
+                if not text_value:
+                    self.log("⚠ 探したい文字を入力してください")
+                    return
+                try:
+                    dx = int(dx_field.get() or "0")
+                    dy = int(dy_field.get() or "0")
+                except ValueError:
+                    self.log("⚠ ずらす量は数字で入力してください")
+                    return
+                language = lang_field.get().strip() or "jpn+eng"
+                psm = psm_field.get()
+                try:
+                    region = region_field.get_region()
+                except ValueError:
+                    self.log("⚠ 領域は数字で入力してください")
+                    return
+                slot_name = slot_field.get().strip()
+                param_text = "{{" + slot_name + "}}" if slot_name else text_value
+
+                params = {
+                    "text": param_text, "dx": dx, "dy": dy,
+                    "region": region, "language": language, "psm": psm,
+                }
+                try:
+                    self._run_screen_search_hidden(
+                        self.recorder.desktop.click_text_ocr,
+                        text_value, dx=dx, dy=dy, region=region, language=language, psm=psm,
+                    )
+                    self.log("→ 実際にOCRで文字を見つけて、指定した位置をクリックできました")
+                    retry_cfg = self._ask_retry()
+                    self.register_step({
+                        "handler": "desktop", "action": "click_text_ocr",
+                        "params": params, "retry": retry_cfg,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+                    if self._confirm("未確認のままこの手順を登録しますか?"):
+                        self.register_step({
+                            "handler": "desktop", "action": "click_text_ocr", "params": params,
+                        })
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
         elif action == "座標をクリックする":
             x_field = PlainField(f, "X座標", default="0")
