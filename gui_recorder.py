@@ -106,6 +106,7 @@ DOMAIN_ACTIONS = {
         "1段階だけ親フレームに戻る",
         "ダウンロード先フォルダを指定する", "ダウンロードの完了を待つ",
         "文字を基準にずらした位置をクリックする", "同じ文字列が複数ある時に番号で指定してクリックする",
+        "画像が見つかるまでスクロールして探す",
     ],
     "explorer": [
         "パスを開く", "フォルダを作成する", "ファイルを移動する", "ファイルをコピーする",
@@ -122,6 +123,7 @@ DOMAIN_ACTIONS = {
         "ウィンドウサイズを指定する(タイトル指定)", "ウィンドウ位置を指定する(タイトル指定)",
         "表示倍率(ズーム)を指定する(キー操作)",
         "画像を基準にずらした位置をクリックする", "画像2つの間の位置(%)をクリックする",
+        "画像が見つかるまでスクロールして探す", "待機する",
     ],
     "text": [
         "文字を探して切り出す", "文字を置換する", "日付・時刻を取得する",
@@ -336,6 +338,86 @@ class BoolField(ttk.Frame):
 
     def get(self) -> bool:
         return self.var.get()
+
+
+class RegionField(ttk.Frame):
+    """画像検索・スクリーンショット等で使う「検索範囲を画面全体か特定領域に
+    絞るか」の入力欄。左端X/上端Y/幅/高さの数字を変えるたびに、画面全体を
+    縮小したイメージ図の中でどのあたりが範囲になるかを赤枠でプレビュー表示する
+    (数字だけでは範囲の見当がつけにくいため)。
+    """
+
+    CANVAS_W = 220
+    CANVAS_H = 130
+
+    def __init__(self, parent, desktop_handler, enabled_label: str):
+        super().__init__(parent)
+        self._screen_w, self._screen_h = 1920, 1080
+        try:
+            size = desktop_handler.get_screen_size()
+            self._screen_w = max(1, int(size["width"]))
+            self._screen_h = max(1, int(size["height"]))
+        except Exception:  # noqa: BLE001
+            pass
+
+        self.enabled_field = BoolField(self, enabled_label)
+        self.enabled_field.pack(anchor="w", pady=(8, 2))
+        self.enabled_field.var.trace_add("write", lambda *_: self._redraw())
+
+        self.left_field = PlainField(self, "領域の左端X(ピクセル)")
+        self.left_field.pack(fill="x", pady=2)
+        self.top_field = PlainField(self, "領域の上端Y(ピクセル)")
+        self.top_field.pack(fill="x", pady=2)
+        self.width_field = PlainField(self, "領域の幅(ピクセル)")
+        self.width_field.pack(fill="x", pady=2)
+        self.height_field = PlainField(self, "領域の高さ(ピクセル)")
+        self.height_field.pack(fill="x", pady=2)
+        for field in (self.left_field, self.top_field, self.width_field, self.height_field):
+            field.var.trace_add("write", lambda *_: self._redraw())
+
+        self.canvas = tk.Canvas(
+            self, width=self.CANVAS_W, height=self.CANVAS_H,
+            bg="#eee", highlightthickness=1, highlightbackground="#999",
+        )
+        self.canvas.pack(pady=(6, 2))
+        self.info_label = ttk.Label(self, text="", foreground="#557")
+        self.info_label.pack(anchor="w")
+        self._redraw()
+
+    def _redraw(self) -> None:
+        self.canvas.delete("all")
+        scale = min(self.CANVAS_W / self._screen_w, self.CANVAS_H / self._screen_h)
+        draw_w, draw_h = self._screen_w * scale, self._screen_h * scale
+        off_x, off_y = (self.CANVAS_W - draw_w) / 2, (self.CANVAS_H - draw_h) / 2
+        self.canvas.create_rectangle(
+            off_x, off_y, off_x + draw_w, off_y + draw_h, outline="#888", fill="#fff",
+        )
+        if not self.enabled_field.get():
+            self.info_label.config(text=f"画面全体を検索します({self._screen_w}x{self._screen_h})")
+            return
+        try:
+            left = int(self.left_field.get() or "0")
+            top = int(self.top_field.get() or "0")
+            width = int(self.width_field.get() or "0")
+            height = int(self.height_field.get() or "0")
+        except ValueError:
+            self.info_label.config(text="⚠ 領域は数字で入力してください")
+            return
+        rx0, ry0 = off_x + left * scale, off_y + top * scale
+        rx1, ry1 = off_x + (left + width) * scale, off_y + (top + height) * scale
+        self.canvas.create_rectangle(rx0, ry0, rx1, ry1, outline="#d33", fill="#f99", stipple="gray50")
+        self.info_label.config(text=f"({left},{top}) から 幅{width}×高さ{height}px の範囲を検索します")
+
+    def get_region(self) -> list[int] | None:
+        """有効チェックが入っていなければNone(画面全体)。有効な場合は
+        [left, top, width, height] を返す(数字でなければValueErrorを送出)。
+        """
+        if not self.enabled_field.get():
+            return None
+        return [
+            int(self.left_field.get()), int(self.top_field.get()),
+            int(self.width_field.get()), int(self.height_field.get()),
+        ]
 
 
 class ImagePasteField(ttk.Frame):
@@ -3288,6 +3370,76 @@ class RecorderApp(_AppBase):
 
             ttk.Button(f, text="選択した番号で動作確認して登録", command=on_submit).pack(pady=6)
 
+        elif action == "画像が見つかるまでスクロールして探す":
+            ttk.Label(
+                f, text="DOM/表示テキストでは見つけにくい要素(入れ子のモーダルやcanvas描画等)"
+                "向けに、指定した順番で4方向(右/下/左/上)へページをスクロールしながら、"
+                "登録した画像が見つかるまで探します。見つけた位置をそのままクリックするか、"
+                "移動するだけにするかを選べます。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
+            img_field = ImagePasteField(f, "探したい画像")
+            img_field.pack(fill="x", pady=4)
+            ttk.Label(f, text="スクロールする方向の順番:").pack(anchor="w", pady=(6, 0))
+            order_var = tk.StringVar(value="right_down_left_up")
+            ttk.Radiobutton(
+                f, text="右→下→左→上", variable=order_var, value="right_down_left_up",
+            ).pack(anchor="w")
+            ttk.Radiobutton(
+                f, text="左→下→右→上", variable=order_var, value="left_down_right_up",
+            ).pack(anchor="w")
+            conf_field = PlainField(f, "一致の緩さ(confidence, 0.1〜1.0)", default="0.8")
+            conf_field.pack(fill="x", pady=4)
+            click_field = BoolField(f, "見つけた位置をクリックする(オフの場合は移動のみ)")
+            click_field.pack(fill="x", pady=4)
+            dx_field = PlainField(f, "クリック位置のX方向のずれ(右がプラス)", default="0")
+            dx_field.pack(fill="x", pady=2)
+            dy_field = PlainField(f, "クリック位置のY方向のずれ(下がプラス)", default="0")
+            dy_field.pack(fill="x", pady=2)
+            slot_field = PlainField(f, "画像パスをスロットにする場合のスロット名(任意)")
+            slot_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                image_path = img_field.get()
+                if not image_path:
+                    self.log("⚠ 画像を指定してください(貼り付け または 参照)")
+                    return
+                try:
+                    confidence = float(conf_field.get() or "0.8")
+                except ValueError:
+                    confidence = 0.8
+                direction_order = order_var.get()
+                click_after_found = click_field.get()
+                try:
+                    click_dx = int(dx_field.get() or "0")
+                    click_dy = int(dy_field.get() or "0")
+                except ValueError:
+                    click_dx = click_dy = 0
+                slot_name = slot_field.get().strip()
+                param_path = "{{" + slot_name + "}}" if slot_name else image_path
+
+                params = {
+                    "image_path": param_path, "direction_order": direction_order,
+                    "confidence": confidence, "click_after_found": click_after_found,
+                    "click_dx": click_dx, "click_dy": click_dy,
+                }
+                try:
+                    self._run_screen_search_hidden(
+                        self.recorder.browser.scroll_until_image_found,
+                        image_path, direction_order=direction_order, confidence=confidence,
+                        click_after_found=click_after_found, click_dx=click_dx, click_dy=click_dy,
+                    )
+                    self.log("→ スクロールして画像を見つけられました")
+                    retry_cfg = self._ask_retry()
+                    self.register_step({
+                        "handler": "browser", "action": "scroll_until_image_found",
+                        "params": params, "retry": retry_cfg,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
     def _build_web_index_kind(self, parent: ttk.Frame, kind: str) -> None:
         """番号指定操作の一覧プレビュー(Listbox)+ 種類ごとの入力欄 + 登録ボタンを作る。"""
         listbox = tk.Listbox(parent, height=8, width=75)
@@ -3935,16 +4087,8 @@ class RecorderApp(_AppBase):
             slot_field = PlainField(f, "画像パスをスロットにする場合のスロット名(任意)")
             slot_field.pack(fill="x", pady=4)
 
-            region_enabled_field = BoolField(f, "検索範囲を画面全体ではなく特定の領域に絞る")
-            region_enabled_field.pack(anchor="w", pady=(8, 2))
-            region_left_field = PlainField(f, "領域の左端X(ピクセル)")
-            region_left_field.pack(fill="x", pady=2)
-            region_top_field = PlainField(f, "領域の上端Y(ピクセル)")
-            region_top_field.pack(fill="x", pady=2)
-            region_width_field = PlainField(f, "領域の幅(ピクセル)")
-            region_width_field.pack(fill="x", pady=2)
-            region_height_field = PlainField(f, "領域の高さ(ピクセル)")
-            region_height_field.pack(fill="x", pady=2)
+            region_field = RegionField(f, self.recorder.desktop, "検索範囲を画面全体ではなく特定の領域に絞る")
+            region_field.pack(fill="x", pady=2)
 
             def on_submit():
                 image_path = img_field.get()
@@ -3958,16 +4102,11 @@ class RecorderApp(_AppBase):
                 slot_name = slot_field.get().strip()
                 param_path = "{{" + slot_name + "}}" if slot_name else image_path
 
-                region = None
-                if region_enabled_field.get():
-                    try:
-                        region = [
-                            int(region_left_field.get()), int(region_top_field.get()),
-                            int(region_width_field.get()), int(region_height_field.get()),
-                        ]
-                    except ValueError:
-                        self.log("⚠ 領域は数字で入力してください")
-                        return
+                try:
+                    region = region_field.get_region()
+                except ValueError:
+                    self.log("⚠ 領域は数字で入力してください")
+                    return
 
                 action_name = "locate_and_click" if is_click else "move_to_image"
                 try:
@@ -4117,6 +4256,98 @@ class RecorderApp(_AppBase):
 
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
+        elif action == "画像が見つかるまでスクロールして探す":
+            ttk.Label(
+                f, text="指定した順番で4方向(右/下/左/上)へ繰り返しスクロールしながら、"
+                "登録した画像が見つかるまで探します。見つけた位置をそのままクリックするか、"
+                "移動するだけにするかを選べます。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
+            img_field = ImagePasteField(f, "探したい画像")
+            img_field.pack(fill="x", pady=4)
+            ttk.Label(f, text="スクロールする方向の順番:").pack(anchor="w", pady=(6, 0))
+            order_var = tk.StringVar(value="right_down_left_up")
+            ttk.Radiobutton(
+                f, text="右→下→左→上", variable=order_var, value="right_down_left_up",
+            ).pack(anchor="w")
+            ttk.Radiobutton(
+                f, text="左→下→右→上", variable=order_var, value="left_down_right_up",
+            ).pack(anchor="w")
+            conf_field = PlainField(f, "一致の緩さ(confidence, 0.1〜1.0)", default="0.8")
+            conf_field.pack(fill="x", pady=4)
+            click_field = BoolField(f, "見つけた位置をクリックする(オフの場合は移動のみ)")
+            click_field.pack(fill="x", pady=4)
+            dx_field = PlainField(f, "クリック位置のX方向のずれ(右がプラス)", default="0")
+            dx_field.pack(fill="x", pady=2)
+            dy_field = PlainField(f, "クリック位置のY方向のずれ(下がプラス)", default="0")
+            dy_field.pack(fill="x", pady=2)
+            slot_field = PlainField(f, "画像パスをスロットにする場合のスロット名(任意)")
+            slot_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                image_path = img_field.get()
+                if not image_path:
+                    self.log("⚠ 画像を指定してください(貼り付け または 参照)")
+                    return
+                try:
+                    confidence = float(conf_field.get() or "0.8")
+                except ValueError:
+                    confidence = 0.8
+                direction_order = order_var.get()
+                click_after_found = click_field.get()
+                try:
+                    click_dx = int(dx_field.get() or "0")
+                    click_dy = int(dy_field.get() or "0")
+                except ValueError:
+                    click_dx = click_dy = 0
+                slot_name = slot_field.get().strip()
+                param_path = "{{" + slot_name + "}}" if slot_name else image_path
+
+                params = {
+                    "image_path": param_path, "direction_order": direction_order,
+                    "confidence": confidence, "click_after_found": click_after_found,
+                    "click_dx": click_dx, "click_dy": click_dy,
+                }
+                try:
+                    self._run_screen_search_hidden(
+                        self.recorder.desktop.scroll_until_image_found,
+                        image_path, direction_order=direction_order, confidence=confidence,
+                        click_after_found=click_after_found, click_dx=click_dx, click_dy=click_dy,
+                    )
+                    self.log("→ スクロールして画像を見つけられました")
+                    retry_cfg = self._ask_retry()
+                    self.register_step({
+                        "handler": "desktop", "action": "scroll_until_image_found",
+                        "params": params, "retry": retry_cfg,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+                    if self._confirm("未確認のままこの手順を登録しますか?"):
+                        self.register_step({
+                            "handler": "desktop", "action": "scroll_until_image_found", "params": params,
+                        })
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "待機する":
+            seconds_field = PlainField(f, "待機する秒数", default="2")
+            seconds_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                try:
+                    seconds = float(seconds_field.get())
+                except ValueError:
+                    self.log("⚠ 数字で入力してください")
+                    return
+                self.register_step({
+                    "handler": "browser", "action": "wait_seconds",
+                    "params": {"seconds": seconds},
+                    "verify": {"type": "none"}, "verify_skip": False,
+                })
+                self.log(f"→ {seconds}秒の待機を登録しました")
+
+            ttk.Button(f, text="登録", command=on_submit).pack(pady=6)
+
         elif action == "座標をクリックする":
             x_field = PlainField(f, "X座標", default="0")
             x_field.pack(fill="x", pady=2)
@@ -4197,29 +4428,16 @@ class RecorderApp(_AppBase):
             path_field.add_button("参照...", lambda: path_field.browse_save_file(".png"))
             path_field.pack(fill="x", pady=4)
 
-            region_enabled_field = BoolField(f, "画面全体ではなく特定の領域だけを撮影する")
-            region_enabled_field.pack(anchor="w", pady=(8, 2))
-            region_left_field = PlainField(f, "領域の左端X(ピクセル)")
-            region_left_field.pack(fill="x", pady=2)
-            region_top_field = PlainField(f, "領域の上端Y(ピクセル)")
-            region_top_field.pack(fill="x", pady=2)
-            region_width_field = PlainField(f, "領域の幅(ピクセル)")
-            region_width_field.pack(fill="x", pady=2)
-            region_height_field = PlainField(f, "領域の高さ(ピクセル)")
-            region_height_field.pack(fill="x", pady=2)
+            region_field = RegionField(f, self.recorder.desktop, "画面全体ではなく特定の領域だけを撮影する")
+            region_field.pack(fill="x", pady=2)
 
             def on_submit():
                 test_v, _, _ = path_field.get()
-                region = None
-                if region_enabled_field.get():
-                    try:
-                        region = [
-                            int(region_left_field.get()), int(region_top_field.get()),
-                            int(region_width_field.get()), int(region_height_field.get()),
-                        ]
-                    except ValueError:
-                        self.log("⚠ 領域は数字で入力してください")
-                        return
+                try:
+                    region = region_field.get_region()
+                except ValueError:
+                    self.log("⚠ 領域は数字で入力してください")
+                    return
                 try:
                     self.recorder.desktop.take_screenshot(test_v, region=region)
                     self.log(f"→ 保存できました: {test_v}")

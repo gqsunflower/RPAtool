@@ -1863,6 +1863,9 @@ class MacroRecorder:
             print("  23) 指定した文字を基準に、ずらした位置をクリックする")
             print("      (目印文字の近くにある、文字を持たない要素をクリックしたい場合)")
             print("  24) 同じ文字列が複数ある場合に、番号を指定してクリックする")
+            print("  25) 画像が見つかるまでスクロールして探す")
+            print("      (DOM/文字では見つけにくい要素向け。見つけたらクリックするか")
+            print("      移動するだけかを選べる)")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -1915,10 +1918,12 @@ class MacroRecorder:
                 self._record_click_offset_text()
             elif choice == "24":
                 self._record_click_text_index()
+            elif choice == "25":
+                self._record_web_scroll_until_image_found()
             elif choice == "0":
                 return
             else:
-                print("0〜24のいずれかを入力してください。\n")
+                print("0〜25のいずれかを入力してください。\n")
 
     def _record_click_offset_text(self) -> None:
         print("  ※ 目印にしたい文字自体はクリック対象ではなく、その近くにある")
@@ -1997,6 +2002,63 @@ class MacroRecorder:
                 "params": {"text_hint": text_hint, "index": index, "obstruction_wait_seconds": obstruction_wait},
                 "verify": verify_cfg, "verify_skip": False,
                 "retry": retry_cfg,
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+
+    def _record_web_scroll_until_image_found(self) -> None:
+        print("  ※ DOM/表示テキストでは見つけにくい要素(入れ子のモーダルや")
+        print("     canvas描画等)向けに、指定した順番で4方向(右/下/左/上)へ")
+        print("     ページをスクロールしながら、登録した画像が見つかるまで")
+        print("     探します。見つけた位置をそのままクリックするか、")
+        print("     移動するだけにするかを選べます。")
+        result = self._ask_sluttable_value("探したい画像ファイルのパス")
+        if result is None:
+            print("  → キャンセルしました。\n")
+            return
+        test_value, param_value = result
+
+        print("  スクロールする方向の順番を選んでください:")
+        print("    1) 右→下→左→上")
+        print("    2) 左→下→右→上")
+        order_choice = self._ask("  番号(空Enterで1): ").strip()
+        direction_order = "left_down_right_up" if order_choice == "2" else "right_down_left_up"
+
+        conf_raw = self._ask(
+            "  一致の緩さ(confidence)を0.1〜1.0で指定してください(空Enterで既定値0.8): "
+        )
+        try:
+            confidence = float(conf_raw) if conf_raw else 0.8
+        except ValueError:
+            confidence = 0.8
+
+        click_answer = self._ask("  見つけた位置をクリックしますか? (y/n、空Enterでn): ").strip().lower()
+        click_after_found = click_answer in ("y", "yes", "はい")
+        click_dx = click_dy = 0
+        if click_after_found:
+            dx_raw = self._ask("  画像の中心からのX方向のずれ(右がプラス。空Enterで0): ").strip()
+            dy_raw = self._ask("  画像の中心からのY方向のずれ(下がプラス。空Enterで0): ").strip()
+            try:
+                click_dx = int(dx_raw) if dx_raw else 0
+                click_dy = int(dy_raw) if dy_raw else 0
+            except ValueError:
+                click_dx = click_dy = 0
+
+        params = {
+            "image_path": param_value, "direction_order": direction_order, "confidence": confidence,
+            "click_after_found": click_after_found, "click_dx": click_dx, "click_dy": click_dy,
+        }
+        try:
+            self.browser.scroll_until_image_found(
+                test_value, direction_order=direction_order, confidence=confidence,
+                click_after_found=click_after_found, click_dx=click_dx, click_dy=click_dy,
+            )
+            print("  → 実際にスクロールして画像を見つけられました。")
+            retry_cfg = self._ask_retry()
+            self.steps.append({
+                "handler": "browser", "action": "scroll_until_image_found",
+                "params": params, "retry": retry_cfg,
             })
             print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
         except Exception as e:  # noqa: BLE001
@@ -3212,6 +3274,9 @@ class MacroRecorder:
             print("      (目印画像の近くにある、目印を持たない場所をクリックしたい場合)")
             print("  13) 登録した画像2つの間の位置(%)をクリックする")
             print("      (目印画像が2つ離れて2つあり、その間を狙いたい場合)")
+            print("  14) 画像が見つかるまでスクロールして探す")
+            print("      (見つけたらクリックするか、移動するだけかを選べる)")
+            print("  15) 指定した秒数だけ待機する")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -3242,10 +3307,14 @@ class MacroRecorder:
                 self._record_desktop_click_offset_image()
             elif choice == "13":
                 self._record_desktop_click_between_images()
+            elif choice == "14":
+                self._record_desktop_scroll_until_image_found()
+            elif choice == "15":
+                self._record_wait()
             elif choice == "0":
                 return
             else:
-                print("0〜13のいずれかを入力してください。\n")
+                print("0〜15のいずれかを入力してください。\n")
 
     def _record_desktop_set_zoom(self) -> None:
         print("  ※ 今アクティブなウィンドウ(通常はブラウザ)が対象です。事前に")
@@ -3588,6 +3657,70 @@ class MacroRecorder:
             print(f"  ⚠ {e}")
             if self._ask("  それでもこの手順として登録しますか? (y/N): ").lower() == "y":
                 self.steps.append({"handler": "desktop", "action": "click_between_images", "params": params})
+                print("  → 未確認のまま登録しました。\n")
+            else:
+                print("  → 登録しませんでした。\n")
+
+    def _record_desktop_scroll_until_image_found(self) -> None:
+        print("  ※ 指定した順番で4方向(右/下/左/上)へ繰り返しスクロールしながら、")
+        print("     登録した画像が見つかるまで探します。見つけた位置をそのまま")
+        print("     クリックするか、移動するだけにするかを選べます。")
+        result = self._ask_sluttable_value("探したい画像ファイルのパス")
+        if result is None:
+            print("  → キャンセルしました。\n")
+            return
+        test_value, param_value = result
+
+        print("  スクロールする方向の順番を選んでください:")
+        print("    1) 右→下→左→上")
+        print("    2) 左→下→右→上")
+        order_choice = self._ask("  番号(空Enterで1): ").strip()
+        direction_order = "left_down_right_up" if order_choice == "2" else "right_down_left_up"
+
+        conf_raw = self._ask(
+            "  一致の緩さ(confidence)を0.1〜1.0で指定してください(空Enterで既定値0.8): "
+        )
+        try:
+            confidence = float(conf_raw) if conf_raw else 0.8
+        except ValueError:
+            confidence = 0.8
+        region = self._ask_desktop_region()
+
+        click_answer = self._ask("  見つけた位置をクリックしますか? (y/n、空Enterでn): ").strip().lower()
+        click_after_found = click_answer in ("y", "yes", "はい")
+        click_dx = click_dy = 0
+        if click_after_found:
+            dx_raw = self._ask("  画像の中心からのX方向のずれ(右がプラス。空Enterで0): ").strip()
+            dy_raw = self._ask("  画像の中心からのY方向のずれ(下がプラス。空Enterで0): ").strip()
+            try:
+                click_dx = int(dx_raw) if dx_raw else 0
+                click_dy = int(dy_raw) if dy_raw else 0
+            except ValueError:
+                click_dx = click_dy = 0
+
+        params = {
+            "image_path": param_value, "direction_order": direction_order,
+            "confidence": confidence, "region": region,
+            "click_after_found": click_after_found, "click_dx": click_dx, "click_dy": click_dy,
+        }
+        try:
+            self.desktop.scroll_until_image_found(
+                test_value, direction_order=direction_order, confidence=confidence, region=region,
+                click_after_found=click_after_found, click_dx=click_dx, click_dy=click_dy,
+            )
+            print("  → 実際にスクロールして画像を見つけられました。")
+            retry_cfg = self._ask_retry()
+            self.steps.append({
+                "handler": "desktop", "action": "scroll_until_image_found",
+                "params": params, "retry": retry_cfg,
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}")
+            if self._ask("  それでもこの手順として登録しますか? (y/N): ").lower() == "y":
+                self.steps.append({
+                    "handler": "desktop", "action": "scroll_until_image_found", "params": params,
+                })
                 print("  → 未確認のまま登録しました。\n")
             else:
                 print("  → 登録しませんでした。\n")

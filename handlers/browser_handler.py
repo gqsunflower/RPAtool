@@ -70,6 +70,16 @@ def _xpath_literal(text: str) -> str:
 
 _SUPPORTED_BROWSERS = ("chrome", "edge")
 
+# scroll_until_image_found用: 4方向を試す順番の2パターンと、各方向の
+# window.scrollBy(x, y)向けの符号(右方向・下方向がプラス)。
+_SCROLL_DIRECTION_ORDERS: dict[str, list[str]] = {
+    "right_down_left_up": ["right", "down", "left", "up"],
+    "left_down_right_up": ["left", "down", "right", "up"],
+}
+_SCROLL_DELTAS: dict[str, tuple[int, int]] = {
+    "down": (0, 1), "up": (0, -1), "right": (1, 0), "left": (-1, 0),
+}
+
 # ドライバ起動失敗時のエラーメッセージから「対応バージョン」と「実際のブラウザバージョン」を
 # 拾うための正規表現。Chrome/Edge両方のSessionNotCreatedExceptionメッセージが
 # 概ねこの形式("This version of XxxDriver only supports Yyy version N" +
@@ -764,6 +774,100 @@ class BrowserHandler:
         self._assert_still_on_site()
         logger.info("文字基準でオフセットクリックしました: '%s' + (%d,%d)", text_hint, dx, dy)
         return f"clicked offset ({dx},{dy}) from text: {text_hint}"
+
+    def scroll_until_image_found(
+        self,
+        image_path: str,
+        direction_order: str = "right_down_left_up",
+        confidence: float = 0.8,
+        scroll_amount: int = 400,
+        max_scrolls_per_direction: int = 20,
+        pause: float = 0.3,
+        region: tuple[int, int, int, int] | list[int] | None = None,
+        click_after_found: bool = False,
+        click_dx: int = 0,
+        click_dy: int = 0,
+    ) -> str:
+        """指定した順番で4方向(右/下/左/上)へページをスクロールしながら、
+        画面上に image_path の画像が見つかるまで繰り返し探す。DOM/表示
+        テキストでは見つけにくい要素(canvas描画・入れ子のモーダル等)向けに、
+        実際に画面に映った見た目をスクリーンショットで探す
+        (デスクトップ操作のlocate_and_click等と同じ仕組みを使うため、
+        pyautoguiが必要)。見つかった時点ですぐに止め、マウスをその中心
+        (click_dx/click_dyがあればそこからずらした位置)へ移動する。
+        click_after_found=Trueの場合はその位置をクリックまで行う(既定は
+        Falseで、移動のみ。続けてデスクトップ操作のlocate_and_click等で
+        同じ画像を指定してクリックすることもできる)。
+
+        direction_order: "right_down_left_up"(右→下→左→上)または
+        "left_down_right_up"(左→下→右→上)。ページが縦方向にしか
+        スクロールしない場合、横方向のスクロールはスクロール位置に変化が
+        無かった時点で早めにあきらめ、自動的に次の方向へ進む。
+        """
+        from handlers.desktop_handler import (
+            ImageNotFoundError as _ImageNotFoundError,
+            _import_pyautogui,
+            locate_image_on_screen_once,
+        )
+
+        order = _SCROLL_DIRECTION_ORDERS.get(direction_order)
+        if order is None:
+            raise ValueError(
+                f"direction_orderは{sorted(_SCROLL_DIRECTION_ORDERS)}のいずれかにしてください: {direction_order}"
+            )
+        gui = _import_pyautogui()
+        norm_region = tuple(int(v) for v in region) if region else None
+
+        self._assert_still_on_site()
+        driver = self._get_driver()
+
+        def try_locate():
+            try:
+                return locate_image_on_screen_once(gui, image_path, confidence, norm_region)
+            except _ImageNotFoundError:
+                return None
+
+        def move_or_click(center) -> tuple[int, int]:
+            x, y = center.x + click_dx, center.y + click_dy
+            gui.moveTo(x, y, duration=0.2)
+            if click_after_found:
+                gui.click(x, y)
+            return x, y
+
+        box = try_locate()
+        if box is not None:
+            x, y = move_or_click(gui.center(box))
+            verb = "clicked" if click_after_found else "found"
+            logger.info("スクロール不要で画像が見つかりました: %s", image_path)
+            return f"{verb} without scrolling at: ({x}, {y})"
+
+        for direction in order:
+            sdx, sdy = _SCROLL_DELTAS[direction]
+            for _ in range(max_scrolls_per_direction):
+                before_x = driver.execute_script("return window.scrollX;")
+                before_y = driver.execute_script("return window.scrollY;")
+                driver.execute_script(
+                    "window.scrollBy(arguments[0], arguments[1]);",
+                    sdx * scroll_amount, sdy * scroll_amount,
+                )
+                time.sleep(pause)
+                after_x = driver.execute_script("return window.scrollX;")
+                after_y = driver.execute_script("return window.scrollY;")
+                if after_x == before_x and after_y == before_y:
+                    # この方向にはこれ以上進めない(縦専用ページの左右等) -> 次の方向へ
+                    break
+                box = try_locate()
+                if box is not None:
+                    x, y = move_or_click(gui.center(box))
+                    verb = "clicked" if click_after_found else "found"
+                    self._assert_still_on_site()
+                    logger.info("スクロールして画像を見つけました: %s (方向=%s)", image_path, direction)
+                    return f"{verb} while scrolling {direction}: ({x}, {y})"
+
+        self._assert_still_on_site()
+        raise _ImageNotFoundError(
+            f"4方向にスクロールしましたが、画像が見つかりませんでした: {image_path}"
+        )
 
     def _click_with_obstruction_wait(
         self,

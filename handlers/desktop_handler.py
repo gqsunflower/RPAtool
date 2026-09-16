@@ -49,6 +49,53 @@ class WindowNotFoundError(Exception):
 _ZOOM_LEVELS = [25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500]
 
 
+def locate_image_on_screen_once(gui, image_path: str, confidence: float, region=None):
+    """画面上から一度だけ画像を探す(タイムアウトによる再試行はしない)。
+    見つからなければImageNotFoundErrorを送出する。DesktopHandler.scroll_until_image_found
+    やBrowserHandler.scroll_until_image_found等、複数のハンドラから共通で使う
+    (画像検索そのものはアプリの種類に関係なく画面全体に対して行うため)。
+    """
+    p = Path(image_path)
+    if not p.exists():
+        raise FileNotFoundError(f"画像ファイルが見つかりません: {p}")
+
+    # cv2.imread()はWindowsで非ASCII文字(日本語等)を含むパスを正しく開けない
+    # 既知の問題があり、ファイルが実在してもエラーにも例外にもならず"見つから
+    # ない"扱いになってしまう(このプロジェクト自体が「デスクトップ」「AI work」
+    # 「RPAツール」等、日本語を含むフォルダ名の下にあるため、通常の使い方でも
+    # 起きうる)。そのため、パス文字列をそのまま渡すのではなく、PIL側で
+    # あらかじめ画像を読み込んでおき(PILは非ASCIIパスでも問題なく読み込める)、
+    # 画像オブジェクトの方をpyautoguiへ渡すことでこの問題を回避している。
+    try:
+        from PIL import Image
+        needle = Image.open(p)
+    except Exception as e:  # noqa: BLE001
+        raise ImageNotFoundError(f"画像ファイルを読み込めませんでした: {p}({e})") from e
+
+    # pyautogui.locateOnScreenは見つからない場合に常にNoneを返すとは限らず、
+    # (opencvでのconfidence指定検索時など)ImageNotFoundExceptionを送出する
+    # こともあるため、両方とも同じ「見つからなかった」として扱う。
+    try:
+        try:
+            box = gui.locateOnScreen(needle, confidence=confidence, region=region)
+        except TypeError:
+            # opencv-python未インストール時、confidence引数は受け付けられない
+            box = gui.locateOnScreen(needle, region=region)
+    except Exception:  # noqa: BLE001
+        box = None
+    if box is None:
+        area = f"領域{region}内" if region else "画面全体"
+        raise ImageNotFoundError(f"{area}に画像が見つかりませんでした: {p}")
+    return box
+
+
+# scroll_until_image_found用: 4方向を試す順番の2パターン。
+_SCROLL_DIRECTION_ORDERS: dict[str, list[str]] = {
+    "right_down_left_up": ["right", "down", "left", "up"],
+    "left_down_right_up": ["left", "down", "right", "up"],
+}
+
+
 def _import_pyautogui():
     try:
         import pyautogui
@@ -313,46 +360,19 @@ class DesktopHandler:
         region: tuple[int, int, int, int] | list[int] | None = None,
     ):
         gui = self._gui()
-        p = Path(image_path)
-        if not p.exists():
-            raise FileNotFoundError(f"画像ファイルが見つかりません: {p}")
         region = self._normalize_region(region)
 
-        # cv2.imread()はWindowsで非ASCII文字(日本語等)を含むパスを正しく開けない
-        # 既知の問題があり、ファイルが実在してもエラーにも例外にもならず"見つから
-        # ない"扱いになってしまう(このプロジェクト自体が「デスクトップ」「AI work」
-        # 「RPAツール」等、日本語を含むフォルダ名の下にあるため、通常の使い方でも
-        # 起きうる)。そのため、パス文字列をそのまま渡すのではなく、PIL側で
-        # あらかじめ画像を読み込んでおき(PILは非ASCIIパスでも問題なく読み込める)、
-        # 画像オブジェクトの方をpyautoguiへ渡すことでこの問題を回避している。
-        try:
-            from PIL import Image
-            needle = Image.open(p)
-        except Exception as e:  # noqa: BLE001
-            raise ImageNotFoundError(f"画像ファイルを読み込めませんでした: {p}({e})") from e
-
         deadline = time.monotonic() + timeout
-        last_err: Exception | None = None
+        last_err: ImageNotFoundError | None = None
         while True:
             try:
-                box = gui.locateOnScreen(needle, confidence=confidence, region=region)
-            except TypeError:
-                # opencv-python未インストール時、confidence引数は受け付けられない
-                box = gui.locateOnScreen(needle, region=region)
-            except Exception as e:  # noqa: BLE001
+                return locate_image_on_screen_once(gui, image_path, confidence, region)
+            except ImageNotFoundError as e:
                 last_err = e
-                box = None
-            if box is not None:
-                return box
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.5)
-
-        area = f"領域{region}内" if region else "画面全体"
-        msg = f"{area}に画像が見つかりませんでした: {p}"
-        if last_err:
-            msg += f"(内部エラー: {last_err})"
-        raise ImageNotFoundError(msg)
+        raise last_err
 
     def move_to_image(
         self,
@@ -464,6 +484,137 @@ class DesktopHandler:
         gui.click(x, y, button=button, clicks=clicks)
         logger.info("座標を直接クリックしました: (%d, %d)", x, y)
         return f"clicked at: ({x}, {y})"
+
+    def _scroll_step(self, gui, direction: str, amount: int) -> None:
+        """マウスホイールのスクロールを1回分送る。左右はShiftキーを押しながら
+        縦スクロールを送る、Windowsで広く使われる水平スクロールの方式を使う
+        (pyautogui.hscrollは実際に試したところChrome等で正しく水平方向に
+        働かなかったため採用していない)。
+        """
+        if direction == "down":
+            gui.scroll(-amount)
+        elif direction == "up":
+            gui.scroll(amount)
+        elif direction == "right":
+            gui.keyDown("shift")
+            try:
+                gui.scroll(-amount)
+            finally:
+                gui.keyUp("shift")
+        elif direction == "left":
+            gui.keyDown("shift")
+            try:
+                gui.scroll(amount)
+            finally:
+                gui.keyUp("shift")
+        else:
+            raise ValueError(f"未対応の方向です: {direction}")
+
+    def _move_or_click(
+        self, gui, center, click_after_found: bool, click_dx: int, click_dy: int
+    ) -> tuple[int, int]:
+        """見つかった画像の中心(center)からclick_dx/click_dyだけずらした位置へ
+        マウスを移動する。click_after_found=Trueならその位置をクリックまで行う。
+        """
+        x, y = center.x + click_dx, center.y + click_dy
+        gui.moveTo(x, y, duration=0.2)
+        if click_after_found:
+            gui.click(x, y)
+        return x, y
+
+    def scroll_until_image_found(
+        self,
+        image_path: str,
+        direction_order: str = "right_down_left_up",
+        confidence: float = 0.8,
+        scroll_amount: int = 60,
+        max_scrolls_per_direction: int = 30,
+        pause: float = 0.3,
+        region: tuple[int, int, int, int] | list[int] | None = None,
+        click_after_found: bool = False,
+        click_dx: int = 0,
+        click_dy: int = 0,
+    ) -> str:
+        """指定した順番で4方向(右/下/左/上)へスクロールしながら、画面上に
+        image_path の画像が見つかるまで繰り返し探す。見つかった時点ですぐに
+        止め、マウスをその中心(click_dx/click_dyがあればそこからずらした
+        位置)へ移動する。click_after_found=Trueの場合はその位置をクリックまで
+        行う(既定はFalseで、移動のみ。続けてlocate_and_click等で同じ画像を
+        指定してクリックすることもできる)。
+
+        direction_order: "right_down_left_up"(右→下→左→上)または
+        "left_down_right_up"(左→下→右→上)。横方向のスクロールに対応して
+        いないページ・ウィンドウ(縦にしかスクロールしない場合等)では、
+        その方向へスクロールしても画面に変化が2回連続で無かった時点で
+        あきらめ、自動的に次の方向へ進む(1回だけで判定すると、単調な
+        背景色の範囲内でのわずかなスクロールを「変化なし」と誤判定して
+        しまうことがあるため)。
+
+        scroll_amount: 1回のスクロールで送るマウスホイールの「クリック数」
+        相当の値。実際に何ピクセル分スクロールされるかはOS・アプリ側の
+        設定(例: Windowsの「ホイールを1回回転させたときにスクロールする
+        行数」)に依存し、環境によって大きく変わる。狙った位置を通り過ぎて
+        しまう場合は値を小さく、遠くまで探索したいのに届かない場合は
+        値を大きくすること。
+        """
+        order = _SCROLL_DIRECTION_ORDERS.get(direction_order)
+        if order is None:
+            raise ValueError(
+                f"direction_orderは{sorted(_SCROLL_DIRECTION_ORDERS)}のいずれかにしてください: {direction_order}"
+            )
+        gui = self._gui()
+        norm_region = self._normalize_region(region)
+
+        try:
+            box = locate_image_on_screen_once(gui, image_path, confidence, norm_region)
+            center = gui.center(box)
+            x, y = self._move_or_click(gui, center, click_after_found, click_dx, click_dy)
+            verb = "clicked" if click_after_found else "found"
+            logger.info("スクロール不要で画像が見つかりました: %s", image_path)
+            return f"{verb} without scrolling at: ({x}, {y})"
+        except ImageNotFoundError:
+            pass
+
+        snap_region = norm_region or (0, 0, *gui.size())
+        # マウスホイールのスクロールは(pyautoguiのx/y引数を渡しても)常に
+        # 「実際のカーソル位置」に送られるため、スクロールしたい場所の中心へ
+        # 先にカーソルを動かしておく(動かさないと、直前の操作でカーソルが
+        # 別のウィンドウ上に残っていた場合、そちらがスクロールされてしまう)。
+        cursor_x = snap_region[0] + snap_region[2] // 2
+        cursor_y = snap_region[1] + snap_region[3] // 2
+        gui.moveTo(cursor_x, cursor_y, duration=0.2)
+
+        for direction in order:
+            stall_count = 0
+            for _ in range(max_scrolls_per_direction):
+                before = gui.screenshot(region=snap_region).tobytes()
+                self._scroll_step(gui, direction, scroll_amount)
+                time.sleep(pause)
+                after = gui.screenshot(region=snap_region).tobytes()
+                if before == after:
+                    # 見た目の変化だけでは、スクロール量が小さく単調な背景の
+                    # 範囲内に収まっていただけ(実際にはスクロールできている)の
+                    # 場合と区別できない。連続して変化が無かった場合のみ
+                    # 「この方向にはこれ以上進めない」(縦専用ページの左右等)と
+                    # みなして次の方向へ進む。
+                    stall_count += 1
+                    if stall_count >= 2:
+                        break
+                    continue
+                stall_count = 0
+                try:
+                    box = locate_image_on_screen_once(gui, image_path, confidence, norm_region)
+                except ImageNotFoundError:
+                    continue
+                center = gui.center(box)
+                x, y = self._move_or_click(gui, center, click_after_found, click_dx, click_dy)
+                verb = "clicked" if click_after_found else "found"
+                logger.info("スクロールして画像を見つけました: %s (方向=%s)", image_path, direction)
+                return f"{verb} while scrolling {direction}: ({x}, {y})"
+
+        raise ImageNotFoundError(
+            f"4方向にスクロールしましたが、画像が見つかりませんでした: {image_path}"
+        )
 
     def type_text(self, text: str, interval: float = 0.02) -> str:
         """今フォーカスされている場所に文字列を入力する(OSのキーボード入力として送る)。
