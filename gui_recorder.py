@@ -20,6 +20,7 @@ MacroRecorderが内部に持つExcel/PDF/Web/エクスプローラー/実行フ�
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
 import tkinter as tk
@@ -34,6 +35,24 @@ _NO_VALUE = object()  # register_stepでvalue未指定を表す番人値(Noneも
 
 BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR))
+
+# main.py経由(「GUIで操作を登録」)ではなく gui_recorder.py を直接実行した場合、
+# ルートロガーに何もハンドラが設定されず、各ハンドラのlogger.info(...)が
+# 画面にもファイルにも一切出力されず消えてしまう。実機動作の食い違いを
+# 診断する際にcmd画面のログを頼りにできるよう、直接実行時もmain.pyと同じ
+# 形式でコンソール+ファイル(logs/rpa_local_ai.log)へ出力しておく。
+# (basicConfigはルートロガーに既にハンドラがある場合は何もしないため、
+# main.py経由で起動した場合の設定を上書きすることはない)
+_LOG_DIR = BASE_DIR / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(_LOG_DIR / "rpa_local_ai.log", encoding="utf-8"),
+    ],
+)
 
 from engine.codegen import UnsupportedMacroError, build_exe, generate_script  # noqa: E402
 from engine.executor import MacroExecutor, _substitute  # noqa: E402
@@ -3399,6 +3418,19 @@ class RecorderApp(_AppBase):
             slot_field = PlainField(f, "画像パスをスロットにする場合のスロット名(任意)")
             slot_field.pack(fill="x", pady=4)
 
+            def _auto_check_click_on_offset(*_args):
+                # ずれの数値を入れたのにクリックのチェックを付け忘れる事故を防ぐため、
+                # X/Yどちらかに0以外の値が入ったら自動でチェックを入れる
+                # (チェックを外す操作自体は妨げない)。
+                try:
+                    if int(dx_field.get() or "0") or int(dy_field.get() or "0"):
+                        click_field.var.set(True)
+                except ValueError:
+                    pass
+
+            dx_field.var.trace_add("write", _auto_check_click_on_offset)
+            dy_field.var.trace_add("write", _auto_check_click_on_offset)
+
             def on_submit():
                 image_path = img_field.get()
                 if not image_path:
@@ -4283,6 +4315,19 @@ class RecorderApp(_AppBase):
             dy_field.pack(fill="x", pady=2)
             slot_field = PlainField(f, "画像パスをスロットにする場合のスロット名(任意)")
             slot_field.pack(fill="x", pady=4)
+
+            def _auto_check_click_on_offset(*_args):
+                # ずれの数値を入れたのにクリックのチェックを付け忘れる事故を防ぐため、
+                # X/Yどちらかに0以外の値が入ったら自動でチェックを入れる
+                # (チェックを外す操作自体は妨げない)。
+                try:
+                    if int(dx_field.get() or "0") or int(dy_field.get() or "0"):
+                        click_field.var.set(True)
+                except ValueError:
+                    pass
+
+            dx_field.var.trace_add("write", _auto_check_click_on_offset)
+            dy_field.var.trace_add("write", _auto_check_click_on_offset)
 
             def on_submit():
                 image_path = img_field.get()

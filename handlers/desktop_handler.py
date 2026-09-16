@@ -510,13 +510,137 @@ class DesktopHandler:
         else:
             raise ValueError(f"未対応の方向です: {direction}")
 
+    # クリック位置がウィンドウの外にはみ出さないよう、見つけた後にあらかじめ
+    # click_dx/click_dyの何倍の距離を追加でスクロールしておくか。
+    _CLICK_OFFSET_PRESCROLL_FACTOR = 1.5
+    # 上の倍率をかけた値がこれ未満の場合、Windowsのホイール入力の最小単位
+    # (WHEEL_DELTA=120)未満になり、アプリによっては「1ノッチ」として認識
+    # されず実質スクロールされないことがあるため、最低でもこの値を送る。
+    _CLICK_OFFSET_PRESCROLL_MIN = 150
+
+    def _click_offset_scroll_amount(self, offset: int) -> int:
+        return max(
+            self._CLICK_OFFSET_PRESCROLL_MIN,
+            int(round(abs(offset) * self._CLICK_OFFSET_PRESCROLL_FACTOR)),
+        )
+
+    @staticmethod
+    def _offset_needs_prescroll(offset: int, positive_dir: str, negative_dir: str, search_direction: str | None) -> bool:
+        """このオフセットの方向へ、事前スクロールが本当に必要かどうかを判定する。
+
+        画像を探すためにスクロールした方向(search_direction)と、クリック
+        したい方向が「逆」の場合、その領域は探索スクロールの過程で既に
+        画面を通過済み(=既に見えている)ので、追加でスクロールする必要は
+        無い(見つけたらそのまま即座にクリックしてよい)。探索方向と「同じ」
+        方向の場合だけ、まだ見えていない可能性があるので事前スクロールが
+        必要になる。search_directionがこの軸と無関係(None、または別の軸の
+        方向)の場合は、安全側に倒して従来どおり必要と判定する。
+        """
+        if offset == 0:
+            return False
+        wanted_dir = positive_dir if offset > 0 else negative_dir
+        opposite_dir = negative_dir if offset > 0 else positive_dir
+        if search_direction == wanted_dir:
+            return True
+        if search_direction == opposite_dir:
+            return False
+        return True
+
+    def _scroll_extra_for_click_offset(
+        self, gui, image_path: str, confidence: float, norm_region,
+        center, click_dx: int, click_dy: int, search_direction: str | None = None,
+    ):
+        """見つかった画像から見てclick_dx/click_dyだけずらした位置をクリック
+        する前に、必要な場合のみその方向へあらかじめ多め(click_dx/click_dyの
+        1.5倍、ただし最低でも_CLICK_OFFSET_PRESCROLL_MIN)にスクロールしておく。
+        目印画像がスクロール終端付近で見つかり、そのすぐ下/上/左/右をそのまま
+        クリックすると、対象ウィンドウの外(別のウィンドウ等)をクリック
+        してしまうことがあるための対策。
+
+        ただし、画像を探すために既にスクロールした方向(search_direction)と
+        クリックしたい方向が逆の場合は、その領域は探索の過程で既に画面を
+        通過済み(安全に見えている)なので、事前スクロールをスキップして
+        即座にクリックする(_offset_needs_prescroll参照)。これにより、
+        動的な描画のあるサイトで事前スクロール後の再検出が不安定になる
+        リスクそのものを避けられる。
+
+        事前スクロールを行った場合、それによって画像自体の画面上の位置も
+        動くため、スクロール後は必ず画像を再検出し、その新しい位置を基準に
+        クリック位置を計算し直す(再検出できなかった場合は、スクロール前の
+        位置を基準にする)。
+
+        マウスホイールのスクロールは実際のカーソル位置に送られるため、
+        スクロール前に見つかった画像の中心へカーソルを移動してから送る。
+        """
+        logger.info(
+            "事前スクロール前の画像の中心: (%d, %d) / click_dx=%d, click_dy=%d, "
+            "search_direction=%s",
+            center.x, center.y, click_dx, click_dy, search_direction,
+        )
+        need_vertical = self._offset_needs_prescroll(click_dy, "down", "up", search_direction)
+        need_horizontal = self._offset_needs_prescroll(click_dx, "right", "left", search_direction)
+        if not need_vertical and not need_horizontal:
+            target_x, target_y = center.x + click_dx, center.y + click_dy
+            logger.info(
+                "探索スクロールと逆方向のオフセットのため、既に見えている領域と判断し"
+                "事前スクロールを省略します。最終的なクリック目標地点: (%d, %d)",
+                target_x, target_y,
+            )
+            return target_x, target_y, center
+
+        gui.moveTo(center.x, center.y, duration=0.2)
+        if need_vertical:
+            direction = "down" if click_dy > 0 else "up"
+            amount = self._click_offset_scroll_amount(click_dy)
+            logger.info("クリック位置のオフセット分、事前に%s方向へ%d分スクロールします", direction, amount)
+            self._scroll_step(gui, direction, amount)
+        if need_horizontal:
+            direction = "right" if click_dx > 0 else "left"
+            amount = self._click_offset_scroll_amount(click_dx)
+            logger.info("クリック位置のオフセット分、事前に%s方向へ%d分スクロールします", direction, amount)
+            self._scroll_step(gui, direction, amount)
+        # サイト側のアニメーション(スクロールのバウンス、追従ヘッダーの
+        # 出入り等)がまだ収まりきっていないタイミングだと、1回目の再検出だけ
+        # 一時的に失敗することがあるため、短い間隔を空けて数回リトライしてから
+        # あきらめる。
+        found_after_scroll = False
+        for attempt in range(3):
+            time.sleep(0.3)
+            try:
+                box = locate_image_on_screen_once(gui, image_path, confidence, norm_region)
+                center = gui.center(box)
+                logger.info("事前スクロール後に再検出した画像の中心: (%d, %d)", center.x, center.y)
+                found_after_scroll = True
+                break
+            except ImageNotFoundError:
+                continue
+        if not found_after_scroll:
+            # 追加スクロールで画像を見失った場合は、スクロール前の位置を基準にする。
+            logger.info("事前スクロール後に画像を見失ったため、スクロール前の位置を基準にします")
+        target_x, target_y = center.x + click_dx, center.y + click_dy
+        logger.info("最終的なクリック目標地点: (%d, %d)", target_x, target_y)
+        return target_x, target_y, center
+
     def _move_or_click(
-        self, gui, center, click_after_found: bool, click_dx: int, click_dy: int
+        self, gui, center, click_after_found: bool, click_dx: int, click_dy: int,
+        image_path: str | None = None, confidence: float = 0.8, norm_region=None,
+        search_direction: str | None = None,
     ) -> tuple[int, int]:
         """見つかった画像の中心(center)からclick_dx/click_dyだけずらした位置へ
         マウスを移動する。click_after_found=Trueならその位置をクリックまで行う。
+        click_after_found=Trueかつオフセットが指定されている場合は、先に
+        _scroll_extra_for_click_offsetでクリック位置方向へあらかじめ
+        多めにスクロールしてから、新しい画像位置を基準に移動・クリックする
+        (search_directionで探索スクロール方向を伝えると、その逆方向の
+        オフセットは既に見えている領域として事前スクロールを省略する)。
         """
-        x, y = center.x + click_dx, center.y + click_dy
+        if click_after_found and (click_dx or click_dy) and image_path is not None:
+            x, y, center = self._scroll_extra_for_click_offset(
+                gui, image_path, confidence, norm_region, center, click_dx, click_dy,
+                search_direction=search_direction,
+            )
+        else:
+            x, y = center.x + click_dx, center.y + click_dy
         gui.moveTo(x, y, duration=0.2)
         if click_after_found:
             gui.click(x, y)
@@ -541,6 +665,13 @@ class DesktopHandler:
         位置)へ移動する。click_after_found=Trueの場合はその位置をクリックまで
         行う(既定はFalseで、移動のみ。続けてlocate_and_click等で同じ画像を
         指定してクリックすることもできる)。
+
+        click_after_found=Trueかつdx/dyでオフセットを指定した場合、クリックする
+        前にあらかじめその方向へ(click_dx/click_dyの1.5倍の距離)追加で
+        スクロールしてから、画像を再検出してクリック位置を計算し直す(画像が
+        スクロール終端付近で見つかり、その少し下/上/左/右をそのままクリック
+        しようとすると対象ウィンドウの外、つまり別のウィンドウを誤って
+        クリックしてしまうことがあるための対策)。
 
         direction_order: "right_down_left_up"(右→下→左→上)または
         "left_down_right_up"(左→下→右→上)。横方向のスクロールに対応して
@@ -568,7 +699,10 @@ class DesktopHandler:
         try:
             box = locate_image_on_screen_once(gui, image_path, confidence, norm_region)
             center = gui.center(box)
-            x, y = self._move_or_click(gui, center, click_after_found, click_dx, click_dy)
+            x, y = self._move_or_click(
+                gui, center, click_after_found, click_dx, click_dy,
+                image_path=image_path, confidence=confidence, norm_region=norm_region,
+            )
             verb = "clicked" if click_after_found else "found"
             logger.info("スクロール不要で画像が見つかりました: %s", image_path)
             return f"{verb} without scrolling at: ({x}, {y})"
@@ -607,7 +741,11 @@ class DesktopHandler:
                 except ImageNotFoundError:
                     continue
                 center = gui.center(box)
-                x, y = self._move_or_click(gui, center, click_after_found, click_dx, click_dy)
+                x, y = self._move_or_click(
+                    gui, center, click_after_found, click_dx, click_dy,
+                    image_path=image_path, confidence=confidence, norm_region=norm_region,
+                    search_direction=direction,
+                )
                 verb = "clicked" if click_after_found else "found"
                 logger.info("スクロールして画像を見つけました: %s (方向=%s)", image_path, direction)
                 return f"{verb} while scrolling {direction}: ({x}, {y})"

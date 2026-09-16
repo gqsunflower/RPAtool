@@ -799,6 +799,13 @@ class BrowserHandler:
         Falseで、移動のみ。続けてデスクトップ操作のlocate_and_click等で
         同じ画像を指定してクリックすることもできる)。
 
+        click_after_found=Trueかつdx/dyでオフセットを指定した場合、クリックする
+        前にあらかじめその方向へ(click_dx/click_dyの1.5倍の距離)ページを
+        追加でスクロールしてから、画像を再検出してクリック位置を計算し直す
+        (画像がスクロール終端付近で見つかり、その少し下/上/左/右をそのまま
+        クリックしようとすると対象のウィンドウの外、つまり別のウィンドウを
+        誤ってクリックしてしまうことがあるための対策)。
+
         direction_order: "right_down_left_up"(右→下→左→上)または
         "left_down_right_up"(左→下→右→上)。ページが縦方向にしか
         スクロールしない場合、横方向のスクロールはスクロール位置に変化が
@@ -827,8 +834,60 @@ class BrowserHandler:
             except _ImageNotFoundError:
                 return None
 
-        def move_or_click(center) -> tuple[int, int]:
-            x, y = center.x + click_dx, center.y + click_dy
+        click_offset_prescroll_factor = 1.5
+
+        def offset_needs_prescroll(offset: int, positive_dir: str, negative_dir: str, search_direction) -> bool:
+            """探索スクロール方向(search_direction)と逆方向のオフセットは、
+            探索の過程で既に画面を通過済み(=既に見えている)ので、事前
+            スクロールを省略できる。詳細はdesktop_handler側の同名ロジックの
+            コメントを参照。"""
+            if offset == 0:
+                return False
+            wanted_dir = positive_dir if offset > 0 else negative_dir
+            opposite_dir = negative_dir if offset > 0 else positive_dir
+            if search_direction == wanted_dir:
+                return True
+            if search_direction == opposite_dir:
+                return False
+            return True
+
+        def scroll_extra_for_click_offset(center, search_direction=None):
+            """見つかった画像から見てclick_dx/click_dyだけずらした位置を
+            クリックする前に、必要な場合のみその方向へあらかじめ多め(1.5倍)に
+            ページをスクロールしておく。目印画像がスクロール終端付近で見つかり、
+            そのすぐ下/上/左/右をそのままクリックすると、対象ウィンドウの外
+            (別のウィンドウ等)をクリックしてしまうことがあるための対策。
+
+            ただし、search_directionと逆方向のオフセットは既に見えている
+            領域なので事前スクロールをスキップし、即座にクリックする。
+
+            事前スクロールを行った場合、それによって画像自体の画面上の位置も
+            動くため、スクロール後は必ず画像を再検出し、その新しい位置を基準に
+            クリック位置を計算し直す(再検出できなかった場合は、スクロール前の
+            位置を基準にする)。
+            """
+            need_vertical = offset_needs_prescroll(click_dy, "down", "up", search_direction)
+            need_horizontal = offset_needs_prescroll(click_dx, "right", "left", search_direction)
+            if not need_vertical and not need_horizontal:
+                return center.x + click_dx, center.y + click_dy, center
+
+            factor = click_offset_prescroll_factor
+            dx_px = click_dx * factor if need_horizontal else 0
+            dy_px = click_dy * factor if need_vertical else 0
+            driver.execute_script(
+                "window.scrollBy(arguments[0], arguments[1]);", dx_px, dy_px,
+            )
+            time.sleep(pause)
+            box = try_locate()
+            if box is not None:
+                center = gui.center(box)
+            return center.x + click_dx, center.y + click_dy, center
+
+        def move_or_click(center, search_direction=None) -> tuple[int, int]:
+            if click_after_found and (click_dx or click_dy):
+                x, y, center = scroll_extra_for_click_offset(center, search_direction)
+            else:
+                x, y = center.x + click_dx, center.y + click_dy
             gui.moveTo(x, y, duration=0.2)
             if click_after_found:
                 gui.click(x, y)
@@ -858,7 +917,7 @@ class BrowserHandler:
                     break
                 box = try_locate()
                 if box is not None:
-                    x, y = move_or_click(gui.center(box))
+                    x, y = move_or_click(gui.center(box), search_direction=direction)
                     verb = "clicked" if click_after_found else "found"
                     self._assert_still_on_site()
                     logger.info("スクロールして画像を見つけました: %s (方向=%s)", image_path, direction)
