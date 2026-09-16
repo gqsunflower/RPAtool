@@ -493,6 +493,126 @@ class ImagePasteField(ttk.Frame):
         return self.value_var.get()
 
 
+class OffsetClickPreview(tk.Canvas):
+    """「画像を基準にずらした位置をクリックする」用のプレビュー。
+    基準画像のサムネイルと、その中心からdx/dyだけずれた位置(実際にクリック
+    される場所)を赤い点で描画する。画像とオフセット点が両方とも収まるように
+    毎回スケールを計算し直すため、ずれの量がどれだけ大きくても(画像の外に
+    大きくはみ出す場合でも)常に全体を表示できる。
+    """
+
+    WIDTH = 320
+    HEIGHT = 200
+    _MARGIN = 24
+
+    def __init__(self, parent):
+        super().__init__(
+            parent, width=self.WIDTH, height=self.HEIGHT,
+            bg="#f5f5f5", highlightthickness=1, highlightbackground="#999",
+        )
+        self._pil_img = None
+        self._img_size = (0, 0)
+        self._photo = None  # GC対策の参照保持
+        self._current_path = None
+        self.redraw(0, 0)
+
+    def set_image(self, path: str) -> None:
+        if path == self._current_path:
+            return
+        self._current_path = path
+        try:
+            from PIL import Image
+            self._pil_img = Image.open(path)
+            self._img_size = self._pil_img.size
+        except Exception:  # noqa: BLE001
+            self._pil_img = None
+            self._img_size = (0, 0)
+
+    def redraw(self, dx: int, dy: int) -> None:
+        self.delete("all")
+        if not self._pil_img or self._img_size == (0, 0):
+            self.create_text(
+                self.WIDTH / 2, self.HEIGHT / 2,
+                text="(画像を指定するとここにプレビューが表示されます)",
+                fill="#888", width=self.WIDTH - 20,
+            )
+            return
+        from PIL import ImageTk
+
+        img_w, img_h = self._img_size
+        min_x, max_x = min(-img_w / 2, dx), max(img_w / 2, dx)
+        min_y, max_y = min(-img_h / 2, dy), max(img_h / 2, dy)
+        world_w, world_h = max(max_x - min_x, 1), max(max_y - min_y, 1)
+        avail_w, avail_h = self.WIDTH - 2 * self._MARGIN, self.HEIGHT - 2 * self._MARGIN
+        scale = min(avail_w / world_w, avail_h / world_h)
+
+        def to_canvas(wx, wy):
+            cx = self.WIDTH / 2 + (wx - (min_x + max_x) / 2) * scale
+            cy = self.HEIGHT / 2 + (wy - (min_y + max_y) / 2) * scale
+            return cx, cy
+
+        thumb_w, thumb_h = max(1, int(img_w * scale)), max(1, int(img_h * scale))
+        try:
+            thumb = self._pil_img.resize((thumb_w, thumb_h))
+            self._photo = ImageTk.PhotoImage(thumb)
+            icx, icy = to_canvas(0, 0)
+            self.create_image(icx, icy, image=self._photo)
+        except Exception:  # noqa: BLE001
+            icx, icy = to_canvas(0, 0)
+        self.create_oval(icx - 3, icy - 3, icx + 3, icy + 3, fill="#39c", outline="")
+        px, py = to_canvas(dx, dy)
+        self.create_line(icx, icy, px, py, fill="#d33", dash=(3, 2))
+        self.create_oval(px - 6, py - 6, px + 6, py + 6, fill="#f33", outline="#900", width=2)
+        self.create_text(px, py - 14, text=f"({dx}, {dy})", fill="#900")
+
+
+class BetweenImagesClickPreview(tk.Canvas):
+    """「画像2つの間の位置(%)をクリックする」用のプレビュー。
+    画像A・画像Bのサムネイルを左右に配置し、その間を結ぶ線分上の
+    指定した%位置(実際にクリックされる場所)を赤い点で描画する。
+    """
+
+    WIDTH = 320
+    HEIGHT = 160
+    _MARGIN = 55
+
+    def __init__(self, parent):
+        super().__init__(
+            parent, width=self.WIDTH, height=self.HEIGHT,
+            bg="#f5f5f5", highlightthickness=1, highlightbackground="#999",
+        )
+        self._photo_a = None
+        self._photo_b = None
+        self.redraw("", "", 50)
+
+    def redraw(self, path_a: str, path_b: str, percent: float) -> None:
+        self.delete("all")
+        cy = self.HEIGHT / 2
+        ax, bx = self._MARGIN, self.WIDTH - self._MARGIN
+        self.create_line(ax, cy, bx, cy, fill="#999", dash=(4, 2))
+
+        from PIL import Image, ImageTk
+
+        for path, x, attr in ((path_a, ax, "_photo_a"), (path_b, bx, "_photo_b")):
+            try:
+                img = Image.open(path)
+                img.thumbnail((70, 70))
+                photo = ImageTk.PhotoImage(img)
+                setattr(self, attr, photo)  # GC対策の参照保持
+                self.create_image(x, cy, image=photo)
+            except Exception:  # noqa: BLE001
+                self.create_oval(x - 20, cy - 20, x + 20, cy + 20, outline="#bbb")
+                self.create_text(x, cy, text="?", fill="#888")
+
+        self.create_text(ax, cy + 45, text="0%(画像A)", fill="#557")
+        self.create_text(bx, cy + 45, text="100%(画像B)", fill="#557")
+
+        t = max(0.0, min(1.0, percent / 100))
+        px = ax + (bx - ax) * t
+        self.create_oval(px - 6, cy - 6, px + 6, cy + 6, fill="#f33", outline="#900", width=2)
+        self.create_text(px, cy - 14, text=f"{percent:.0f}%", fill="#900")
+
+
 class PairsField(ttk.Frame):
     """『セル参照: 値』のような対応表を追加していく入力ウィジェット(Excelのセル書込用)。"""
 
@@ -4191,6 +4311,23 @@ class RecorderApp(_AppBase):
             slot_field = PlainField(f, "画像パスをスロットにする場合のスロット名(任意)")
             slot_field.pack(fill="x", pady=4)
 
+            ttk.Label(f, text="プレビュー(実際にクリックされる位置):").pack(anchor="w", pady=(8, 2))
+            offset_preview = OffsetClickPreview(f)
+            offset_preview.pack(pady=(0, 6))
+
+            def _update_offset_preview(*_args):
+                offset_preview.set_image(img_field.get())
+                try:
+                    px = int(dx_field.get() or "0")
+                    py = int(dy_field.get() or "0")
+                except ValueError:
+                    px = py = 0
+                offset_preview.redraw(px, py)
+
+            img_field.value_var.trace_add("write", _update_offset_preview)
+            dx_field.var.trace_add("write", _update_offset_preview)
+            dy_field.var.trace_add("write", _update_offset_preview)
+
             def on_submit():
                 image_path = img_field.get()
                 if not image_path:
@@ -4246,6 +4383,21 @@ class RecorderApp(_AppBase):
             pos_field.pack(fill="x", pady=4)
             conf_field = PlainField(f, "一致の緩さ(confidence, 0.1〜1.0)", default="0.8")
             conf_field.pack(fill="x", pady=4)
+
+            ttk.Label(f, text="プレビュー(実際にクリックされる位置):").pack(anchor="w", pady=(8, 2))
+            between_preview = BetweenImagesClickPreview(f)
+            between_preview.pack(pady=(0, 6))
+
+            def _update_between_preview(*_args):
+                try:
+                    percent = float(pos_field.get() or "50")
+                except ValueError:
+                    percent = 50.0
+                between_preview.redraw(img_a_field.get(), img_b_field.get(), percent)
+
+            img_a_field.value_var.trace_add("write", _update_between_preview)
+            img_b_field.value_var.trace_add("write", _update_between_preview)
+            pos_field.var.trace_add("write", _update_between_preview)
 
             def on_submit():
                 image_a = img_a_field.get()
