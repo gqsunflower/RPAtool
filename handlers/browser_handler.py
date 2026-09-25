@@ -686,7 +686,8 @@ class BrowserHandler:
         return elements
 
     def click_by_text(
-        self, text_hint: str, timeout: int = 10, obstruction_wait_seconds: float = 0
+        self, text_hint: str, timeout: int = 10, obstruction_wait_seconds: float = 0,
+        button: str = "left", clicks: int = 1,
     ) -> str:
         """画面に表示されているであろう文字(ボタン/リンクのラベル)を手がかりにクリックする。
         CSSクラス名やid指定に依存しないため、多少のUI変更(見た目の微修正等)に強い。
@@ -696,6 +697,7 @@ class BrowserHandler:
         0より大きい値を指定すると、その秒数の間は1秒おきに自動で再試行しながら
         待機する(いつ閉じられるか予測できないため、手動で閉じてもらうのを想定した
         待機)。待機しても解消しなければエラーで停止する。
+        button="right"で右クリック、clicks=2でダブルクリックになる。
         """
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
@@ -718,6 +720,7 @@ class BrowserHandler:
             lambda: self._find_visible(xpath, exact_text=text_hint),
             obstruction_wait_seconds,
             f"'{text_hint}' に一致する、現在表示されている要素",
+            button=button, clicks=clicks,
         )
         self._assert_still_on_site()
         logger.info("テキスト一致でクリックしました: '%s' (候補%d件中1件目)", text_hint, len(candidates))
@@ -749,14 +752,15 @@ class BrowserHandler:
         return elements[0]
 
     def click_offset_from_text(
-        self, text_hint: str, dx: int = 0, dy: int = 0, button: str = "left"
+        self, text_hint: str, dx: int = 0, dy: int = 0, button: str = "left", clicks: int = 1,
     ) -> str:
         """指定した文字を目印にして、その要素の中心からdx(右方向がプラス)、
         dy(下方向がプラス)だけずれた位置をクリックする。目印の文字自体は
         クリック対象ではない(例: 見出しの右にある無名のアイコンボタンなど、
         目印に使える文字を持たない要素をクリックしたい)場合に使う。
         click_by_textと異なり、ボタン/リンクに限らず任意の表示テキストを
-        目印にできる。
+        目印にできる。clicksを2にするとダブルクリックになる(button="right"
+        との組み合わせは意味を持たないため無視され、右クリックが優先される)。
         """
         from selenium.webdriver import ActionChains
 
@@ -768,6 +772,8 @@ class BrowserHandler:
         actions.move_to_element_with_offset(el, dx, dy)
         if button == "right":
             actions.context_click()
+        elif clicks == 2:
+            actions.double_click()
         else:
             actions.click()
         actions.perform()
@@ -787,6 +793,8 @@ class BrowserHandler:
         click_after_found: bool = False,
         click_dx: int = 0,
         click_dy: int = 0,
+        button: str = "left",
+        clicks: int = 1,
     ) -> str:
         """指定した順番で4方向(右/下/左/上)へページをスクロールしながら、
         画面上に image_path の画像が見つかるまで繰り返し探す。DOM/表示
@@ -890,7 +898,7 @@ class BrowserHandler:
                 x, y = center.x + click_dx, center.y + click_dy
             gui.moveTo(x, y, duration=0.2)
             if click_after_found:
-                gui.click(x, y)
+                gui.click(x, y, button=button, clicks=clicks)
             return x, y
 
         box = try_locate()
@@ -985,18 +993,23 @@ class BrowserHandler:
         locate_candidates,
         obstruction_wait_seconds: float,
         not_found_label: str,
+        button: str = "left",
+        clicks: int = 1,
     ) -> list:
         """候補要素を探して先頭をクリックする。広告等の別要素にクリックを
         妨害された場合、obstruction_wait_seconds が0より大きければその秒数の間、
         1秒おきに候補を再取得してクリックを再試行する(DOMが変わっても対応
         できるよう、毎回locate_candidates()で探し直す)。要素が見つからない場合は
         待機せずすぐにエラーにする(妨害待ちは「見えているが押せない」場合のみ)。
+        button="right"で右クリック、clicks=2でダブルクリックになる
+        (ActionChains経由。両方指定した場合は右クリックが優先される)。
         """
         from selenium.common.exceptions import (
             ElementClickInterceptedException,
             ElementNotInteractableException,
             StaleElementReferenceException,
         )
+        from selenium.webdriver import ActionChains
 
         deadline = time.monotonic() + obstruction_wait_seconds
         while True:
@@ -1006,7 +1019,14 @@ class BrowserHandler:
             target = candidates[0]
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target)
             try:
-                target.click()
+                actions = ActionChains(driver)
+                if button == "right":
+                    actions.context_click(target)
+                elif clicks == 2:
+                    actions.double_click(target)
+                else:
+                    actions.click(target)
+                actions.perform()
                 return candidates
             except (
                 ElementClickInterceptedException,
@@ -1227,9 +1247,13 @@ class BrowserHandler:
     # UI変更に弱くなるため、まずは *_by_text 系を試し、それでも見つからない
     # ときだけこちらを使うことを推奨する。
 
-    def click_selector(self, selector: str, obstruction_wait_seconds: float = 0) -> str:
+    def click_selector(
+        self, selector: str, obstruction_wait_seconds: float = 0,
+        button: str = "left", clicks: int = 1,
+    ) -> str:
         """obstruction_wait_seconds: click_by_textと同じ考え方で、広告等の別要素に
         クリックを妨害された場合の最大待機秒数(0なら待機せずすぐにエラー)。
+        button="right"で右クリック、clicks=2でダブルクリックになる。
         """
         from selenium.common.exceptions import NoSuchElementException
 
@@ -1243,7 +1267,8 @@ class BrowserHandler:
                 return []
 
         self._click_with_obstruction_wait(
-            driver, _locate, obstruction_wait_seconds, f"セレクタ '{selector}' の要素"
+            driver, _locate, obstruction_wait_seconds, f"セレクタ '{selector}' の要素",
+            button=button, clicks=clicks,
         )
         self._assert_still_on_site()
         return f"clicked: {selector}"
@@ -1508,10 +1533,14 @@ class BrowserHandler:
             for i, el in enumerate(elements, start=1)
         ]
 
-    def click_by_index(self, index: int, obstruction_wait_seconds: float = 0) -> str:
+    def click_by_index(
+        self, index: int, obstruction_wait_seconds: float = 0,
+        button: str = "left", clicks: int = 1,
+    ) -> str:
         """list_clickable_elementsで確認した番号(1始まり)のボタン/リンクをクリックする。
         obstruction_wait_secondsはclick_by_textと同じ(広告等に妨害された場合の
         手動close待ちの最大秒数。0なら待機せずすぐにエラー)。
+        button="right"で右クリック、clicks=2でダブルクリックになる。
         """
         def _locate():
             elements = self._enumerate_visible(self._CLICKABLE_XPATH)
@@ -1521,7 +1550,8 @@ class BrowserHandler:
 
         driver = self._get_driver()
         self._click_with_obstruction_wait(
-            driver, _locate, obstruction_wait_seconds, f"{index}番目のボタン/リンク"
+            driver, _locate, obstruction_wait_seconds, f"{index}番目のボタン/リンク",
+            button=button, clicks=clicks,
         )
         self._assert_still_on_site()
         return f"clicked by index: {index}"
@@ -1538,12 +1568,14 @@ class BrowserHandler:
         ]
 
     def click_by_text_index(
-        self, text_hint: str, index: int, obstruction_wait_seconds: float = 0
+        self, text_hint: str, index: int, obstruction_wait_seconds: float = 0,
+        button: str = "left", clicks: int = 1,
     ) -> str:
         """'{text_hint}'に一致するボタン/リンクが画面に複数ある場合に、
         list_elements_by_textで確認した番号(1始まり、一致するものの中での
         順番)を指定してクリックする。click_by_textは常に1件目をクリックする
         ため、同じ文字列が繰り返し出てくる一覧等で特定の1つを狙いたい場合に使う。
+        button="right"で右クリック、clicks=2でダブルクリックになる。
         """
         def _locate():
             xpath = self._build_clickable_xpath(text_hint)
@@ -1556,6 +1588,7 @@ class BrowserHandler:
         self._click_with_obstruction_wait(
             driver, _locate, obstruction_wait_seconds,
             f"'{text_hint}' に一致する{index}番目のボタン/リンク",
+            button=button, clicks=clicks,
         )
         self._assert_still_on_site()
         return f"clicked by text index: {text_hint}[{index}]"

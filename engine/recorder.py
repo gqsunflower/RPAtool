@@ -1949,15 +1949,16 @@ class MacroRecorder:
         except ValueError:
             print("  数字で入力してください。\n")
             return
+        button, clicks = self._ask_click_type()
 
         try:
-            self.browser.click_offset_from_text(text_hint, dx=dx, dy=dy)
+            self.browser.click_offset_from_text(text_hint, dx=dx, dy=dy, button=button, clicks=clicks)
             print(f"  → 実際に '{text_hint}' を目印に、指定した位置をクリックできました。")
             verify_cfg = self._ask_verification()
             retry_cfg = self._ask_retry()
             self.steps.append({
                 "handler": "browser", "action": "click_offset_from_text",
-                "params": {"text_hint": text_hint, "dx": dx, "dy": dy},
+                "params": {"text_hint": text_hint, "dx": dx, "dy": dy, "button": button, "clicks": clicks},
                 "verify": verify_cfg, "verify_skip": False,
                 "retry": retry_cfg,
             })
@@ -1994,16 +1995,20 @@ class MacroRecorder:
         except ValueError:
             print("  数字で入力してください。\n")
             return
+        button, clicks = self._ask_click_type()
 
         try:
-            self.browser.click_by_text_index(text_hint, index)
+            self.browser.click_by_text_index(text_hint, index, button=button, clicks=clicks)
             print(f"  → 実際に '{text_hint}' の{index}番目をクリックして確認できました。")
             verify_cfg = self._ask_verification()
             retry_cfg = self._ask_retry()
             obstruction_wait = self._ask_obstruction_wait()
             self.steps.append({
                 "handler": "browser", "action": "click_by_text_index",
-                "params": {"text_hint": text_hint, "index": index, "obstruction_wait_seconds": obstruction_wait},
+                "params": {
+                    "text_hint": text_hint, "index": index, "obstruction_wait_seconds": obstruction_wait,
+                    "button": button, "clicks": clicks,
+                },
                 "verify": verify_cfg, "verify_skip": False,
                 "retry": retry_cfg,
             })
@@ -2040,6 +2045,7 @@ class MacroRecorder:
         click_answer = self._ask("  見つけた位置をクリックしますか? (y/n、空Enterでn): ").strip().lower()
         click_after_found = click_answer in ("y", "yes", "はい")
         click_dx = click_dy = 0
+        button, clicks = "left", 1
         if click_after_found:
             dx_raw = self._ask("  画像の中心からのX方向のずれ(右がプラス。空Enterで0): ").strip()
             dy_raw = self._ask("  画像の中心からのY方向のずれ(下がプラス。空Enterで0): ").strip()
@@ -2048,15 +2054,18 @@ class MacroRecorder:
                 click_dy = int(dy_raw) if dy_raw else 0
             except ValueError:
                 click_dx = click_dy = 0
+            button, clicks = self._ask_click_type()
 
         params = {
             "image_path": param_value, "direction_order": direction_order, "confidence": confidence,
             "click_after_found": click_after_found, "click_dx": click_dx, "click_dy": click_dy,
+            "button": button, "clicks": clicks,
         }
         try:
             self.browser.scroll_until_image_found(
                 test_value, direction_order=direction_order, confidence=confidence,
                 click_after_found=click_after_found, click_dx=click_dx, click_dy=click_dy,
+                button=button, clicks=clicks,
             )
             print("  → 実際にスクロールして画像を見つけられました。")
             retry_cfg = self._ask_retry()
@@ -2091,13 +2100,18 @@ class MacroRecorder:
         language = lang_raw or "jpn+eng"
         psm = self._ask_ocr_psm()
         region = self._ask_desktop_region()
+        button, clicks = self._ask_click_type()
 
         params = {
             "text": param_value, "dx": dx, "dy": dy,
             "region": region, "language": language, "psm": psm,
+            "button": button, "clicks": clicks,
         }
         try:
-            self.browser.click_text_ocr(test_value, dx=dx, dy=dy, region=region, language=language, psm=psm)
+            self.browser.click_text_ocr(
+                test_value, dx=dx, dy=dy, region=region, language=language, psm=psm,
+                button=button, clicks=clicks,
+            )
             print("  → 実際にOCRで文字を見つけて、指定した位置をクリックできました。")
             retry_cfg = self._ask_retry()
             self.steps.append({
@@ -2353,8 +2367,9 @@ class MacroRecorder:
         if idx is None:
             print("  → キャンセルしました。\n")
             return
+        button, clicks = self._ask_click_type()
         try:
-            self.browser.click_by_index(idx)
+            self.browser.click_by_index(idx, button=button, clicks=clicks)
             print(f"  → 実際に{idx}番目をクリックして確認できました。")
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠ {e}")
@@ -2366,7 +2381,10 @@ class MacroRecorder:
         obstruction_wait = self._ask_obstruction_wait()
         self.steps.append({
             "handler": "browser", "action": "click_by_index",
-            "params": {"index": idx, "obstruction_wait_seconds": obstruction_wait},
+            "params": {
+                "index": idx, "obstruction_wait_seconds": obstruction_wait,
+                "button": button, "clicks": clicks,
+            },
             "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
         })
         print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
@@ -2692,15 +2710,20 @@ class MacroRecorder:
             print("  → この操作の記録をキャンセルしました。メニューに戻ります。\n")
             return
 
+        button, clicks = self._ask_click_type()
+
         try:
-            self.browser.click_by_text(text_hint)
+            self.browser.click_by_text(text_hint, button=button, clicks=clicks)
             print(f"  → 実際に '{text_hint}' をクリックして確認できました。")
             verify_cfg = self._ask_verification()
             retry_cfg = self._ask_retry()
             obstruction_wait = self._ask_obstruction_wait()
             self.steps.append({
                 "handler": "browser", "action": "click_by_text",
-                "params": {"text_hint": text_hint, "obstruction_wait_seconds": obstruction_wait},
+                "params": {
+                    "text_hint": text_hint, "obstruction_wait_seconds": obstruction_wait,
+                    "button": button, "clicks": clicks,
+                },
                 "verify": verify_cfg, "verify_skip": False,
                 "retry": retry_cfg,
             })
@@ -2713,14 +2736,17 @@ class MacroRecorder:
             )
             if selector:
                 try:
-                    self.browser.click_selector(selector)
+                    self.browser.click_selector(selector, button=button, clicks=clicks)
                     print(f"  → CSSセレクタ '{selector}' でクリックを確認できました。")
                     verify_cfg = self._ask_verification()
                     retry_cfg = self._ask_retry()
                     obstruction_wait = self._ask_obstruction_wait()
                     self.steps.append({
                         "handler": "browser", "action": "click_selector",
-                        "params": {"selector": selector, "obstruction_wait_seconds": obstruction_wait},
+                        "params": {
+                            "selector": selector, "obstruction_wait_seconds": obstruction_wait,
+                            "button": button, "clicks": clicks,
+                        },
                         "verify": verify_cfg, "verify_skip": False,
                         "retry": retry_cfg,
                     })
@@ -2735,7 +2761,10 @@ class MacroRecorder:
                 obstruction_wait = self._ask_obstruction_wait()
                 self.steps.append({
                     "handler": "browser", "action": "click_by_text",
-                    "params": {"text_hint": text_hint, "obstruction_wait_seconds": obstruction_wait},
+                    "params": {
+                        "text_hint": text_hint, "obstruction_wait_seconds": obstruction_wait,
+                        "button": button, "clicks": clicks,
+                    },
                     "verify": verify_cfg, "verify_skip": False,
                     "retry": retry_cfg,
                 })
@@ -3323,6 +3352,9 @@ class MacroRecorder:
             print("  15) 指定した秒数だけ待機する")
             print("  16) 画面をOCRで読み取って文字を探してクリックする")
             print("      (画像に写っている文字等、画像検索では扱いにくい要素向け)")
+            print("  17) 今のマウス位置でクリックする(座標や画像の指定なし)")
+            print("      (先に「画面上の画像を探してマウスを移動する」等で位置を")
+            print("      合わせておき、間に待機を挟んでから改めてクリックしたい場合)")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -3359,10 +3391,12 @@ class MacroRecorder:
                 self._record_wait()
             elif choice == "16":
                 self._record_desktop_click_text_ocr()
+            elif choice == "17":
+                self._record_desktop_click_current_position()
             elif choice == "0":
                 return
             else:
-                print("0〜16のいずれかを入力してください。\n")
+                print("0〜17のいずれかを入力してください。\n")
 
     def _record_desktop_set_zoom(self) -> None:
         print("  ※ 今アクティブなウィンドウ(通常はブラウザ)が対象です。事前に")
@@ -3562,6 +3596,22 @@ class MacroRecorder:
         print("  番号が正しくないため既定値を使います。")
         return OCR_PSM_CHOICES[0][0]
 
+    def _ask_click_type(self) -> tuple[str, int]:
+        """クリックを送信するアクション共通で使う、クリックの種類(左/左W/右)の
+        選択。戻り値は(button, clicks)で、そのままハンドラのbutton/clicks
+        引数に渡せる。
+        """
+        print("  クリックの種類を選んでください:")
+        print("    1) 左クリック(既定)")
+        print("    2) 左ダブルクリック")
+        print("    3) 右クリック")
+        choice = self._ask("  番号(空Enterで1): ").strip()
+        if choice == "2":
+            return "left", 2
+        if choice == "3":
+            return "right", 1
+        return "left", 1
+
     def _record_desktop_screenshot(self) -> None:
         result = self._ask_sluttable_value("保存先の画像パス")
         if result is None:
@@ -3595,9 +3645,13 @@ class MacroRecorder:
         except ValueError:
             confidence = 0.8
         region = self._ask_desktop_region()
+        button, clicks = self._ask_click_type()
 
         try:
-            self.desktop.locate_and_click(test_value, confidence=confidence, timeout=10, region=region)
+            self.desktop.locate_and_click(
+                test_value, confidence=confidence, timeout=10, region=region,
+                button=button, clicks=clicks,
+            )
             print("  → 実際に画像を見つけてクリックできました。")
             verify_cfg = self._ask_desktop_verification(test_value, confidence)
             retry_cfg = self._ask_retry()
@@ -3605,6 +3659,7 @@ class MacroRecorder:
                 "handler": "desktop", "action": "locate_and_click",
                 "params": {
                     "image_path": param_value, "confidence": confidence, "timeout": 10, "region": region,
+                    "button": button, "clicks": clicks,
                 },
                 "verify": verify_cfg, "verify_skip": False,
                 "retry": retry_cfg,
@@ -3617,6 +3672,7 @@ class MacroRecorder:
                     "handler": "desktop", "action": "locate_and_click",
                     "params": {
                         "image_path": param_value, "confidence": confidence, "timeout": 10, "region": region,
+                        "button": button, "clicks": clicks,
                     },
                 })
                 print("  → 未確認のまま登録しました。\n")
@@ -3650,13 +3706,18 @@ class MacroRecorder:
         except ValueError:
             confidence = 0.8
         region = self._ask_desktop_region()
+        button, clicks = self._ask_click_type()
 
         params = {
             "image_path": param_value, "dx": dx, "dy": dy,
             "confidence": confidence, "timeout": 10, "region": region,
+            "button": button, "clicks": clicks,
         }
         try:
-            self.desktop.click_offset_from_image(test_value, dx=dx, dy=dy, confidence=confidence, timeout=10, region=region)
+            self.desktop.click_offset_from_image(
+                test_value, dx=dx, dy=dy, confidence=confidence, timeout=10, region=region,
+                button=button, clicks=clicks,
+            )
             print("  → 実際に画像を見つけて、指定した位置をクリックできました。")
             retry_cfg = self._ask_retry()
             self.steps.append({
@@ -3704,15 +3765,18 @@ class MacroRecorder:
         except ValueError:
             confidence = 0.8
         region = self._ask_desktop_region()
+        button, clicks = self._ask_click_type()
 
         params = {
             "image_path_a": param_a, "image_path_b": param_b, "position_percent": position_percent,
             "confidence": confidence, "timeout": 10, "region": region,
+            "button": button, "clicks": clicks,
         }
         try:
             self.desktop.click_between_images(
                 test_a, test_b, position_percent=position_percent,
                 confidence=confidence, timeout=10, region=region,
+                button=button, clicks=clicks,
             )
             print("  → 実際に2つの画像を見つけて、指定した位置をクリックできました。")
             retry_cfg = self._ask_retry()
@@ -3757,6 +3821,7 @@ class MacroRecorder:
         click_answer = self._ask("  見つけた位置をクリックしますか? (y/n、空Enterでn): ").strip().lower()
         click_after_found = click_answer in ("y", "yes", "はい")
         click_dx = click_dy = 0
+        button, clicks = "left", 1
         if click_after_found:
             dx_raw = self._ask("  画像の中心からのX方向のずれ(右がプラス。空Enterで0): ").strip()
             dy_raw = self._ask("  画像の中心からのY方向のずれ(下がプラス。空Enterで0): ").strip()
@@ -3765,16 +3830,19 @@ class MacroRecorder:
                 click_dy = int(dy_raw) if dy_raw else 0
             except ValueError:
                 click_dx = click_dy = 0
+            button, clicks = self._ask_click_type()
 
         params = {
             "image_path": param_value, "direction_order": direction_order,
             "confidence": confidence, "region": region,
             "click_after_found": click_after_found, "click_dx": click_dx, "click_dy": click_dy,
+            "button": button, "clicks": clicks,
         }
         try:
             self.desktop.scroll_until_image_found(
                 test_value, direction_order=direction_order, confidence=confidence, region=region,
                 click_after_found=click_after_found, click_dx=click_dx, click_dy=click_dy,
+                button=button, clicks=clicks,
             )
             print("  → 実際にスクロールして画像を見つけられました。")
             retry_cfg = self._ask_retry()
@@ -3816,13 +3884,18 @@ class MacroRecorder:
         language = lang_raw or "jpn+eng"
         psm = self._ask_ocr_psm()
         region = self._ask_desktop_region()
+        button, clicks = self._ask_click_type()
 
         params = {
             "text": param_value, "dx": dx, "dy": dy,
             "region": region, "language": language, "psm": psm,
+            "button": button, "clicks": clicks,
         }
         try:
-            self.desktop.click_text_ocr(test_value, dx=dx, dy=dy, region=region, language=language, psm=psm)
+            self.desktop.click_text_ocr(
+                test_value, dx=dx, dy=dy, region=region, language=language, psm=psm,
+                button=button, clicks=clicks,
+            )
             print("  → 実際にOCRで文字を見つけて、指定した位置をクリックできました。")
             retry_cfg = self._ask_retry()
             self.steps.append({
@@ -3883,6 +3956,8 @@ class MacroRecorder:
             print("  数字で入力してください。\n")
             return
 
+        button, clicks = self._ask_click_type()
+
         confirm = self._ask(
             f"  ⚠ 座標({x},{y})を実際にクリックして動作確認します"
             f"(画面解像度が変わると位置がずれます)。よろしいですか? (y/N): "
@@ -3892,11 +3967,39 @@ class MacroRecorder:
             return
 
         try:
-            self.desktop.click_at(x, y)
+            self.desktop.click_at(x, y, button=button, clicks=clicks)
             print(f"  → 実際にクリックできました: ({x},{y})")
             self.steps.append({
                 "handler": "desktop", "action": "click_at",
-                "params": {"x": x, "y": y},
+                "params": {"x": x, "y": y, "button": button, "clicks": clicks},
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+
+    def _record_desktop_click_current_position(self) -> None:
+        print("  ※ 座標や画像の指定をせず、今マウスカーソルがある位置にそのまま")
+        print("     クリックを送信します。先に「画面上の画像を探してマウスを")
+        print("     移動する」等でカーソルを目的の位置へ動かしておき、間に")
+        print("     「指定した秒数だけ待機する」を挟んでから、このアクションで")
+        print("     改めてクリックしたい場合に使います")
+        print("     (ホバーで見た目が変わるボタン等、見た目の変化が落ち着くのを")
+        print("     待ってからクリックしたい場合に有効です)。")
+        button, clicks = self._ask_click_type()
+
+        confirm = self._ask(
+            "  ⚠ 今のマウス位置を実際にクリックして動作確認します。よろしいですか? (y/N): "
+        )
+        if confirm.lower() != "y":
+            print("  → 中止しました。この手順は登録しません。\n")
+            return
+
+        try:
+            result_msg = self.desktop.click_current_position(button=button, clicks=clicks)
+            print(f"  → 実際にクリックできました: {result_msg}")
+            self.steps.append({
+                "handler": "desktop", "action": "click_current_position",
+                "params": {"button": button, "clicks": clicks},
             })
             print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
         except Exception as e:  # noqa: BLE001

@@ -180,6 +180,7 @@ DOMAIN_ACTIONS = {
     "process": ["exe/pyを実行する"],
     "desktop": [
         "画像を探してクリックする", "画像を探してマウス移動する", "座標をクリックする",
+        "今のマウス位置でクリックする",
         "文字列を入力する", "特殊キーを送信する", "スクリーンショットを撮る",
         "開いているウィンドウのタイトル一覧を見る", "ウィンドウをアクティブにする",
         "ウィンドウサイズを指定する(タイトル指定)", "ウィンドウ位置を指定する(タイトル指定)",
@@ -430,6 +431,40 @@ class PsmField(ttk.Frame):
 
     def get(self) -> str:
         return self._label_to_value.get(self.var.get(), OCR_PSM_CHOICES[0][0])
+
+
+# クリックを送信する全アクション共通の、クリック種類の選択肢。
+# (表示ラベル, button, clicks) のタプル一覧。
+_CLICK_TYPE_CHOICES: list[tuple[str, str, int]] = [
+    ("左クリック", "left", 1),
+    ("左ダブルクリック", "left", 2),
+    ("右クリック", "right", 1),
+]
+
+
+class ClickTypeField(ttk.Frame):
+    """クリックを送信するアクション共通の「クリックの種類」選択(左/左W/右)。
+    get()は(button, clicks)のタプルを返し、そのままハンドラのbutton/clicks
+    引数に渡せる。
+    """
+
+    def __init__(self, parent, label: str = "クリックの種類"):
+        super().__init__(parent)
+        ttk.Label(self, text=label, anchor="w").grid(row=0, column=0, sticky="w")
+        self.var = tk.StringVar(value=_CLICK_TYPE_CHOICES[0][0])
+        btn_frame = ttk.Frame(self)
+        btn_frame.grid(row=0, column=1, sticky="w")
+        for choice_label, _button, _clicks in _CLICK_TYPE_CHOICES:
+            ttk.Radiobutton(
+                btn_frame, text=choice_label, variable=self.var, value=choice_label,
+            ).pack(side="left", padx=(0, 10))
+
+    def get(self) -> tuple[str, int]:
+        selected = self.var.get()
+        for choice_label, button, clicks in _CLICK_TYPE_CHOICES:
+            if choice_label == selected:
+                return button, clicks
+        return "left", 1
 
 
 class RegionPicker(tk.Toplevel):
@@ -3018,6 +3053,8 @@ class RecorderApp(_AppBase):
                 f, "広告等に妨害された場合、手動で閉じるのを待つ最大秒数(空欄で待機しない)", width=10,
             )
             obstruction_field.pack(fill="x", pady=4)
+            click_type_field = ClickTypeField(f)
+            click_type_field.pack(fill="x", pady=4)
 
             def on_submit():
                 text_test, text_param, _ = field.get()
@@ -3025,14 +3062,18 @@ class RecorderApp(_AppBase):
                     obstruction_wait = float(obstruction_field.get().strip() or "0")
                 except ValueError:
                     obstruction_wait = 0
+                button, clicks = click_type_field.get()
                 try:
-                    self.recorder.browser.click_by_text(text_test)
+                    self.recorder.browser.click_by_text(text_test, button=button, clicks=clicks)
                     self.log(f"→ '{text_test}' をクリックできました")
                     verify_cfg = self._ask_verify()
                     retry_cfg = self._ask_retry()
                     self.register_step({
                         "handler": "browser", "action": "click_by_text",
-                        "params": {"text_hint": text_param, "obstruction_wait_seconds": obstruction_wait},
+                        "params": {
+                            "text_hint": text_param, "obstruction_wait_seconds": obstruction_wait,
+                            "button": button, "clicks": clicks,
+                        },
                         "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
                     })
                 except ElementNotFoundError as e:
@@ -3042,13 +3083,16 @@ class RecorderApp(_AppBase):
                     )
                     if selector:
                         try:
-                            self.recorder.browser.click_selector(selector)
+                            self.recorder.browser.click_selector(selector, button=button, clicks=clicks)
                             self.log(f"→ セレクタ '{selector}' でクリックできました")
                             verify_cfg = self._ask_verify()
                             retry_cfg = self._ask_retry()
                             self.register_step({
                                 "handler": "browser", "action": "click_selector",
-                                "params": {"selector": selector, "obstruction_wait_seconds": obstruction_wait},
+                                "params": {
+                                    "selector": selector, "obstruction_wait_seconds": obstruction_wait,
+                                    "button": button, "clicks": clicks,
+                                },
                                 "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
                             })
                         except Exception as e2:  # noqa: BLE001
@@ -3628,6 +3672,8 @@ class RecorderApp(_AppBase):
             dx_field.pack(fill="x", pady=4)
             dy_field = PlainField(f, "目印の中心から下へ何ピクセル(上なら負の数)")
             dy_field.pack(fill="x", pady=4)
+            click_type_field = ClickTypeField(f)
+            click_type_field.pack(fill="x", pady=4)
 
             def on_submit():
                 text_test, text_param, _ = text_field.get()
@@ -3636,14 +3682,18 @@ class RecorderApp(_AppBase):
                 except ValueError:
                     self.log("⚠ ずらす量は数字で入力してください")
                     return
+                button, clicks = click_type_field.get()
                 try:
-                    self.recorder.browser.click_offset_from_text(text_test, dx=dx, dy=dy)
+                    self.recorder.browser.click_offset_from_text(text_test, dx=dx, dy=dy, button=button, clicks=clicks)
                     self.log(f"→ '{text_test}' を目印に、指定した位置をクリックできました")
                     verify_cfg = self._ask_verify()
                     retry_cfg = self._ask_retry()
                     self.register_step({
                         "handler": "browser", "action": "click_offset_from_text",
-                        "params": {"text_hint": text_param, "dx": dx, "dy": dy},
+                        "params": {
+                            "text_hint": text_param, "dx": dx, "dy": dy,
+                            "button": button, "clicks": clicks,
+                        },
                         "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
                     })
                 except Exception as e:  # noqa: BLE001
@@ -3689,6 +3739,8 @@ class RecorderApp(_AppBase):
                 f, "広告等に妨害された場合、手動で閉じるのを待つ最大秒数(空欄で待機しない)", width=10,
             )
             obstruction_field.pack(fill="x", pady=4)
+            click_type_field = ClickTypeField(f)
+            click_type_field.pack(fill="x", pady=4)
 
             def on_submit():
                 sel = listbox.curselection()
@@ -3701,8 +3753,9 @@ class RecorderApp(_AppBase):
                     obstruction_wait = float(obstruction_field.get().strip() or "0")
                 except ValueError:
                     obstruction_wait = 0
+                button, clicks = click_type_field.get()
                 try:
-                    self.recorder.browser.click_by_text_index(text_hint, index)
+                    self.recorder.browser.click_by_text_index(text_hint, index, button=button, clicks=clicks)
                     self.log(f"→ '{text_hint}' の{index}番目をクリックできました")
                     verify_cfg = self._ask_verify()
                     retry_cfg = self._ask_retry()
@@ -3711,6 +3764,7 @@ class RecorderApp(_AppBase):
                         "params": {
                             "text_hint": text_hint, "index": index,
                             "obstruction_wait_seconds": obstruction_wait,
+                            "button": button, "clicks": clicks,
                         },
                         "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
                     })
@@ -3745,6 +3799,8 @@ class RecorderApp(_AppBase):
             dx_field.pack(fill="x", pady=2)
             dy_field = PlainField(f, "クリック位置のY方向のずれ(下がプラス)", default="0")
             dy_field.pack(fill="x", pady=2)
+            click_type_field = ClickTypeField(f)
+            click_type_field.pack(fill="x", pady=4)
             slot_field = PlainField(f, "画像パスをスロットにする場合のスロット名(任意)")
             slot_field.pack(fill="x", pady=4)
 
@@ -3779,17 +3835,20 @@ class RecorderApp(_AppBase):
                     click_dx = click_dy = 0
                 slot_name = slot_field.get().strip()
                 param_path = "{{" + slot_name + "}}" if slot_name else image_path
+                button, clicks = click_type_field.get()
 
                 params = {
                     "image_path": param_path, "direction_order": direction_order,
                     "confidence": confidence, "click_after_found": click_after_found,
                     "click_dx": click_dx, "click_dy": click_dy,
+                    "button": button, "clicks": clicks,
                 }
                 try:
                     self._run_screen_search_hidden(
                         self.recorder.browser.scroll_until_image_found,
                         image_path, direction_order=direction_order, confidence=confidence,
                         click_after_found=click_after_found, click_dx=click_dx, click_dy=click_dy,
+                        button=button, clicks=clicks,
                     )
                     self.log("→ スクロールして画像を見つけられました")
                     retry_cfg = self._ask_retry()
@@ -3821,6 +3880,8 @@ class RecorderApp(_AppBase):
             psm_field.pack(fill="x", pady=4)
             region_field = RegionField(f, self.recorder.desktop, "検索範囲を画面全体ではなく特定の領域に絞る")
             region_field.pack(fill="x", pady=2)
+            click_type_field = ClickTypeField(f)
+            click_type_field.pack(fill="x", pady=4)
 
             ttk.Label(
                 f, text="OCRの認識精度は文字の大きさ・背景によって左右されます。"
@@ -3876,15 +3937,18 @@ class RecorderApp(_AppBase):
                 except ValueError:
                     self.log("⚠ 領域は数字で入力してください")
                     return
+                button, clicks = click_type_field.get()
 
                 params = {
                     "text": text_param, "dx": dx, "dy": dy,
                     "region": region, "language": language, "psm": psm,
+                    "button": button, "clicks": clicks,
                 }
                 try:
                     self._run_screen_search_hidden(
                         self.recorder.browser.click_text_ocr,
                         text_test, dx=dx, dy=dy, region=region, language=language, psm=psm,
+                        button=button, clicks=clicks,
                     )
                     self.log("→ 実際にOCRで文字を見つけて、指定した位置をクリックできました")
                     retry_cfg = self._ask_retry()
@@ -4036,6 +4100,8 @@ class RecorderApp(_AppBase):
                 width=10,
             )
             obstruction_field.pack(fill="x", pady=2)
+            click_type_field = ClickTypeField(extra_frame)
+            click_type_field.pack(fill="x", pady=2)
 
             def on_submit():
                 idx = selected_index()
@@ -4045,14 +4111,18 @@ class RecorderApp(_AppBase):
                     obstruction_wait = float(obstruction_field.get().strip() or "0")
                 except ValueError:
                     obstruction_wait = 0
+                button, clicks = click_type_field.get()
                 try:
-                    self.recorder.browser.click_by_index(idx)
+                    self.recorder.browser.click_by_index(idx, button=button, clicks=clicks)
                     self.log(f"→ 実際に{idx}番目をクリックして確認できました")
                     verify_cfg = self._ask_verify()
                     retry_cfg = self._ask_retry()
                     self.register_step({
                         "handler": "browser", "action": "click_by_index",
-                        "params": {"index": idx, "obstruction_wait_seconds": obstruction_wait},
+                        "params": {
+                            "index": idx, "obstruction_wait_seconds": obstruction_wait,
+                            "button": button, "clicks": clicks,
+                        },
                         "verify": verify_cfg, "verify_skip": False, "retry": retry_cfg,
                     })
                 except Exception as e:  # noqa: BLE001
@@ -4546,6 +4616,10 @@ class RecorderApp(_AppBase):
 
             region_field = RegionField(f, self.recorder.desktop, "検索範囲を画面全体ではなく特定の領域に絞る")
             region_field.pack(fill="x", pady=2)
+            click_type_field = None
+            if is_click:
+                click_type_field = ClickTypeField(f)
+                click_type_field.pack(fill="x", pady=4)
 
             def on_submit():
                 image_path = img_field.get()
@@ -4564,19 +4638,26 @@ class RecorderApp(_AppBase):
                 except ValueError:
                     self.log("⚠ 領域は数字で入力してください")
                     return
+                extra_kwargs = {}
+                extra_params = {}
+                if is_click:
+                    button, clicks = click_type_field.get()
+                    extra_kwargs = {"button": button, "clicks": clicks}
+                    extra_params = {"button": button, "clicks": clicks}
 
                 action_name = "locate_and_click" if is_click else "move_to_image"
                 try:
                     self._run_screen_search_hidden(
                         getattr(self.recorder.desktop, action_name),
                         image_path, confidence=confidence, timeout=10, region=region,
+                        **extra_kwargs,
                     )
                     self.log("→ 画像を見つけて実行できました")
                     step = {
                         "handler": "desktop", "action": action_name,
                         "params": {
                             "image_path": param_path, "confidence": confidence,
-                            "timeout": 10, "region": region,
+                            "timeout": 10, "region": region, **extra_params,
                         },
                     }
                     if is_click:
@@ -4593,7 +4674,7 @@ class RecorderApp(_AppBase):
                             "handler": "desktop", "action": action_name,
                             "params": {
                                 "image_path": param_path, "confidence": confidence,
-                                "timeout": 10, "region": region,
+                                "timeout": 10, "region": region, **extra_params,
                             },
                         })
 
@@ -4615,6 +4696,8 @@ class RecorderApp(_AppBase):
             conf_field.pack(fill="x", pady=4)
             slot_field = PlainField(f, "画像パスをスロットにする場合のスロット名(任意)")
             slot_field.pack(fill="x", pady=4)
+            click_type_field = ClickTypeField(f)
+            click_type_field.pack(fill="x", pady=4)
 
             ttk.Label(f, text="プレビュー(実際にクリックされる位置):").pack(anchor="w", pady=(8, 2))
             offset_preview = OffsetClickPreview(f)
@@ -4649,15 +4732,18 @@ class RecorderApp(_AppBase):
                     confidence = 0.8
                 slot_name = slot_field.get().strip()
                 param_path = "{{" + slot_name + "}}" if slot_name else image_path
+                button, clicks = click_type_field.get()
 
                 params = {
                     "image_path": param_path, "dx": dx, "dy": dy,
                     "confidence": confidence, "timeout": 10, "region": None,
+                    "button": button, "clicks": clicks,
                 }
                 try:
                     self._run_screen_search_hidden(
                         self.recorder.desktop.click_offset_from_image,
                         image_path, dx=dx, dy=dy, confidence=confidence, timeout=10,
+                        button=button, clicks=clicks,
                     )
                     self.log("→ 画像を見つけて、指定した位置をクリックできました")
                     retry_cfg = self._ask_retry()
@@ -4688,6 +4774,8 @@ class RecorderApp(_AppBase):
             pos_field.pack(fill="x", pady=4)
             conf_field = PlainField(f, "一致の緩さ(confidence, 0.1〜1.0)", default="0.8")
             conf_field.pack(fill="x", pady=4)
+            click_type_field = ClickTypeField(f)
+            click_type_field.pack(fill="x", pady=4)
 
             ttk.Label(f, text="プレビュー(実際にクリックされる位置):").pack(anchor="w", pady=(8, 2))
             between_preview = BetweenImagesClickPreview(f)
@@ -4719,16 +4807,19 @@ class RecorderApp(_AppBase):
                     confidence = float(conf_field.get() or "0.8")
                 except ValueError:
                     confidence = 0.8
+                button, clicks = click_type_field.get()
 
                 params = {
                     "image_path_a": image_a, "image_path_b": image_b,
                     "position_percent": position_percent,
                     "confidence": confidence, "timeout": 10, "region": None,
+                    "button": button, "clicks": clicks,
                 }
                 try:
                     self._run_screen_search_hidden(
                         self.recorder.desktop.click_between_images,
                         image_a, image_b, position_percent=position_percent, confidence=confidence, timeout=10,
+                        button=button, clicks=clicks,
                     )
                     self.log("→ 2つの画像を見つけて、指定した位置をクリックできました")
                     retry_cfg = self._ask_retry()
@@ -4770,6 +4861,8 @@ class RecorderApp(_AppBase):
             dx_field.pack(fill="x", pady=2)
             dy_field = PlainField(f, "クリック位置のY方向のずれ(下がプラス)", default="0")
             dy_field.pack(fill="x", pady=2)
+            click_type_field = ClickTypeField(f)
+            click_type_field.pack(fill="x", pady=4)
             slot_field = PlainField(f, "画像パスをスロットにする場合のスロット名(任意)")
             slot_field.pack(fill="x", pady=4)
 
@@ -4804,17 +4897,20 @@ class RecorderApp(_AppBase):
                     click_dx = click_dy = 0
                 slot_name = slot_field.get().strip()
                 param_path = "{{" + slot_name + "}}" if slot_name else image_path
+                button, clicks = click_type_field.get()
 
                 params = {
                     "image_path": param_path, "direction_order": direction_order,
                     "confidence": confidence, "click_after_found": click_after_found,
                     "click_dx": click_dx, "click_dy": click_dy,
+                    "button": button, "clicks": clicks,
                 }
                 try:
                     self._run_screen_search_hidden(
                         self.recorder.desktop.scroll_until_image_found,
                         image_path, direction_order=direction_order, confidence=confidence,
                         click_after_found=click_after_found, click_dx=click_dx, click_dy=click_dy,
+                        button=button, clicks=clicks,
                     )
                     self.log("→ スクロールして画像を見つけられました")
                     retry_cfg = self._ask_retry()
@@ -4871,6 +4967,8 @@ class RecorderApp(_AppBase):
             slot_field.pack(fill="x", pady=4)
             region_field = RegionField(f, self.recorder.desktop, "検索範囲を画面全体ではなく特定の領域に絞る")
             region_field.pack(fill="x", pady=2)
+            click_type_field = ClickTypeField(f)
+            click_type_field.pack(fill="x", pady=4)
 
             ttk.Label(
                 f, text="OCRの認識精度は文字の大きさ・背景によって左右されます。"
@@ -4928,15 +5026,18 @@ class RecorderApp(_AppBase):
                     return
                 slot_name = slot_field.get().strip()
                 param_text = "{{" + slot_name + "}}" if slot_name else text_value
+                button, clicks = click_type_field.get()
 
                 params = {
                     "text": param_text, "dx": dx, "dy": dy,
                     "region": region, "language": language, "psm": psm,
+                    "button": button, "clicks": clicks,
                 }
                 try:
                     self._run_screen_search_hidden(
                         self.recorder.desktop.click_text_ocr,
                         text_value, dx=dx, dy=dy, region=region, language=language, psm=psm,
+                        button=button, clicks=clicks,
                     )
                     self.log("→ 実際にOCRで文字を見つけて、指定した位置をクリックできました")
                     retry_cfg = self._ask_retry()
@@ -4958,6 +5059,8 @@ class RecorderApp(_AppBase):
             x_field.pack(fill="x", pady=2)
             y_field = PlainField(f, "Y座標", default="0")
             y_field.pack(fill="x", pady=2)
+            click_type_field = ClickTypeField(f)
+            click_type_field.pack(fill="x", pady=4)
 
             def on_submit():
                 try:
@@ -4965,12 +5068,45 @@ class RecorderApp(_AppBase):
                 except ValueError:
                     self.log("⚠ 数字で入力してください")
                     return
+                button, clicks = click_type_field.get()
                 if not self._confirm(f"座標({x},{y})を実際にクリックします。よろしいですか?"):
                     return
                 try:
-                    self.recorder.desktop.click_at(x, y)
+                    self.recorder.desktop.click_at(x, y, button=button, clicks=clicks)
                     self.log(f"→ クリックできました: ({x},{y})")
-                    self.register_step({"handler": "desktop", "action": "click_at", "params": {"x": x, "y": y}})
+                    self.register_step({
+                        "handler": "desktop", "action": "click_at",
+                        "params": {"x": x, "y": y, "button": button, "clicks": clicks},
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "今のマウス位置でクリックする":
+            ttk.Label(
+                f, text="座標や画像の指定をせず、今マウスカーソルがある位置にそのまま"
+                "クリックを送信します。先に「画像を探してマウスを移動する」等で"
+                "カーソルを目的の位置へ動かしておき、間に「待機する」を挟んでから、"
+                "このアクションで改めてクリックしたい場合に使います"
+                "(ホバーで見た目が変わるボタン等、見た目の変化が落ち着くのを"
+                "待ってからクリックしたい場合に有効です)。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 6))
+            click_type_field2 = ClickTypeField(f)
+            click_type_field2.pack(fill="x", pady=4)
+
+            def on_submit():
+                button, clicks = click_type_field2.get()
+                if not self._confirm("今のマウス位置を実際にクリックします。よろしいですか?"):
+                    return
+                try:
+                    result_msg = self.recorder.desktop.click_current_position(button=button, clicks=clicks)
+                    self.log(f"→ クリックできました: {result_msg}")
+                    self.register_step({
+                        "handler": "desktop", "action": "click_current_position",
+                        "params": {"button": button, "clicks": clicks},
+                    })
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
 

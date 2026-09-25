@@ -608,6 +608,20 @@ class DesktopHandler:
         logger.info("座標を直接クリックしました: (%d, %d)", x, y)
         return f"clicked at: ({x}, {y})"
 
+    def click_current_position(self, button: str = "left", clicks: int = 1) -> str:
+        """座標や画像の指定をせず、今マウスカーソルがある位置にそのまま
+        クリックを送信する。「画像を探してマウスを移動する」等で先にカーソルを
+        目的の位置へ動かしておき、(ホバーで見た目が変わるボタン等で、待機を
+        挟んで見た目の変化が落ち着くのを待ってから)改めてこのアクションで
+        クリックしたい場合に使う。
+        """
+        gui = self._gui()
+        pos = gui.position()
+        x, y = int(pos.x), int(pos.y)
+        gui.click(x, y, button=button, clicks=clicks)
+        logger.info("現在のマウス位置をクリックしました: (%d, %d)", x, y)
+        return f"clicked at current position: ({x}, {y})"
+
     def list_ocr_words(
         self, region: tuple[int, int, int, int] | list[int] | None = None,
         language: str = "jpn+eng", psm: str = _OCR_DEFAULT_PSM,
@@ -813,7 +827,7 @@ class DesktopHandler:
     def _move_or_click(
         self, gui, center, click_after_found: bool, click_dx: int, click_dy: int,
         image_path: str | None = None, confidence: float = 0.8, norm_region=None,
-        search_direction: str | None = None,
+        search_direction: str | None = None, button: str = "left", clicks: int = 1,
     ) -> tuple[int, int]:
         """見つかった画像の中心(center)からclick_dx/click_dyだけずらした位置へ
         マウスを移動する。click_after_found=Trueならその位置をクリックまで行う。
@@ -832,7 +846,7 @@ class DesktopHandler:
             x, y = center.x + click_dx, center.y + click_dy
         gui.moveTo(x, y, duration=0.2)
         if click_after_found:
-            gui.click(x, y)
+            gui.click(x, y, button=button, clicks=clicks)
         return x, y
 
     def scroll_until_image_found(
@@ -847,6 +861,8 @@ class DesktopHandler:
         click_after_found: bool = False,
         click_dx: int = 0,
         click_dy: int = 0,
+        button: str = "left",
+        clicks: int = 1,
     ) -> str:
         """指定した順番で4方向(右/下/左/上)へスクロールしながら、画面上に
         image_path の画像が見つかるまで繰り返し探す。見つかった時点ですぐに
@@ -891,6 +907,7 @@ class DesktopHandler:
             x, y = self._move_or_click(
                 gui, center, click_after_found, click_dx, click_dy,
                 image_path=image_path, confidence=confidence, norm_region=norm_region,
+                button=button, clicks=clicks,
             )
             verb = "clicked" if click_after_found else "found"
             logger.info("スクロール不要で画像が見つかりました: %s", image_path)
@@ -933,7 +950,7 @@ class DesktopHandler:
                 x, y = self._move_or_click(
                     gui, center, click_after_found, click_dx, click_dy,
                     image_path=image_path, confidence=confidence, norm_region=norm_region,
-                    search_direction=direction,
+                    search_direction=direction, button=button, clicks=clicks,
                 )
                 verb = "clicked" if click_after_found else "found"
                 logger.info("スクロールして画像を見つけました: %s (方向=%s)", image_path, direction)
