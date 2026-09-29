@@ -854,7 +854,7 @@ class DesktopHandler:
         image_path: str,
         direction_order: str = "right_down_left_up",
         confidence: float = 0.8,
-        scroll_amount: int = 60,
+        scroll_amount: int = 360,
         max_scrolls_per_direction: int = 30,
         pause: float = 0.3,
         region: tuple[int, int, int, int] | list[int] | None = None,
@@ -886,12 +886,16 @@ class DesktopHandler:
         背景色の範囲内でのわずかなスクロールを「変化なし」と誤判定して
         しまうことがあるため)。
 
-        scroll_amount: 1回のスクロールで送るマウスホイールの「クリック数」
-        相当の値。実際に何ピクセル分スクロールされるかはOS・アプリ側の
-        設定(例: Windowsの「ホイールを1回回転させたときにスクロールする
-        行数」)に依存し、環境によって大きく変わる。狙った位置を通り過ぎて
-        しまう場合は値を小さく、遠くまで探索したいのに届かない場合は
-        値を大きくすること。
+        scroll_amount: 1回のスクロールで送るマウスホイールの量(Windowsの
+        生のホイールデルタ値そのもの。1ノッチ=WHEEL_DELTA=120)。120未満
+        (半ノッチ以下)を指定すると、多くのアプリでは「1ノッチに満たない」
+        として無視され、実質スクロールされないことがあるため、必ず120の
+        倍数を指定すること(既定の360は3ノッチ分で、実測でリストの可視行数の
+        6割程度が一度に動く)。実際に何ピクセル分スクロールされるかはOS・
+        アプリ側の設定(例: Windowsの「ホイールを1回回転させたときに
+        スクロールする行数」)にも依存し、環境によって変わる。狙った位置を
+        通り過ぎてしまう場合は120刻みで値を小さく、もっと速く/遠くまで
+        探索したい場合は120刻みで値を大きくすること。
         """
         order = _SCROLL_DIRECTION_ORDERS.get(direction_order)
         if order is None:

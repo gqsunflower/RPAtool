@@ -36,6 +36,13 @@ MacroExecutor: config/macros.json に登録された「操作手順(マクロ)�
   のいずれかで応答してもらいます。on_result は各ステップの実行結果を
   その場で確認したい場合に、成功のたびに呼び出されます。
 
+即時中断(should_abort):
+  on_step で "run"(連続実行)を選ぶと、以降on_step自体が呼ばれなくなるため、
+  ステップ実行画面の「中止」ボタンでは止められなくなる。should_abort に
+  「今すぐ中断すべきか」を返す関数を渡しておくと、連続実行中でも各ステップの
+  合間に必ず呼び出され、Trueを返した時点でそこまでの結果を返して停止する
+  (例: GUIでCtrl+Breakが押されたかどうかを返す関数を渡す)。
+
 start_step で指定した番号のステップから実行を開始できます。
 end_step を指定すると、そのステップの直前で自動的に実行を停止します
 (end_step自体は実行されません)。on_step の "run"(以降自動実行)を選んだ
@@ -392,6 +399,7 @@ class MacroExecutor:
         on_step: Callable[[int, int, dict], str] | None = None,
         on_result: Callable[[int, int, dict, Any], None] | None = None,
         on_failure: Callable[[int, int, dict, Exception], str] | None = None,
+        should_abort: Callable[[], bool] | None = None,
     ) -> list[Any]:
         macro = self.get_macro(macro_name)
         steps = macro["steps"]
@@ -452,6 +460,12 @@ class MacroExecutor:
                 # いても、この境界だけは必ず守る)。end_step自体は実行しない。
                 logger.info("step %d/%d: end_step(%d)の直前のため停止しました", i, total, end_step)
                 break
+            if should_abort is not None and should_abort():
+                # 連続実行(auto_run)中はon_stepが呼ばれず「中止」ボタンも
+                # 表示されないため、これとは別経路(例: Ctrl+Break)での
+                # 即時中断を、ステップの合間に必ずチェックする。
+                logger.info("should_abortによりステップ%d/%dで中断しました", i, total)
+                return results
             step = steps[i - 1]
             handler_name = step["handler"]
             action_name = step["action"]

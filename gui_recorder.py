@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import signal
 import sys
 import time
 import tkinter as tk
@@ -911,6 +912,7 @@ class RecorderApp(_AppBase):
         self.recorder = MacroRecorder(CONFIG_DIR, browser=browser)
         self.base_step_count = 0
         self._last_registered_index: int | None = None
+        self._step_dialog_pos: tuple[int, int] | None = None
 
         self._build_layout()
         self._on_domain_changed()
@@ -1502,23 +1504,56 @@ class RecorderApp(_AppBase):
         executor.macros[test_key] = macro_def
 
         self.log(f"→ テスト実行を開始します(ステップ{start_step}から"
-                  f"{'最後まで' if end_step is None else f'{end_step}の直前まで'})")
+                  f"{'最後まで' if end_step is None else f'{end_step}の直前まで'})"
+                  "(連続実行中にCtrl+Breakを押すと、次のステップに進む前に中断します)")
+
+        # 「連続実行」を選ぶとon_step自体が呼ばれなくなり、ステップ実行画面の
+        # 「中止」ボタンでは止められなくなるため、それとは別経路でCtrl+Breakを
+        # 検知してexecutor.run()のshould_abortに渡す(コンソール無しで起動した
+        # 場合はCtrl+Break自体が届かないため、その場合は登録しても無害なだけ)。
+        abort_flag = {"value": False}
+
+        def on_ctrl_break(signum, frame) -> None:
+            abort_flag["value"] = True
+            self.log("⚠ Ctrl+Breakを検知しました。次のステップに進む前にテスト実行を中断します。")
+
+        sigbreak = getattr(signal, "SIGBREAK", None)
+        previous_handler = None
+        if sigbreak is not None:
+            try:
+                previous_handler = signal.signal(sigbreak, on_ctrl_break)
+            except (ValueError, OSError):
+                # メインスレッド以外から呼ばれた場合等はシグナルを登録できない。
+                # その場合はCtrl+Breakでの中断機能なしでそのまま実行する。
+                previous_handler = None
+
         try:
             results = executor.run(
                 test_key, slots, dry_run=False,
                 start_step=start_step, end_step=end_step,
                 on_step=self._gui_on_step, on_result=self._gui_on_result,
                 on_failure=self._gui_on_failure,
+                should_abort=lambda: abort_flag["value"],
             )
         except Exception as e:  # noqa: BLE001
             self.log(f"⚠ テスト実行中にエラーが発生しました: {e}")
             return
-        self.log(f"→ テスト実行が終わりました({len(results)}件実行)。")
+        finally:
+            if sigbreak is not None and previous_handler is not None:
+                signal.signal(sigbreak, previous_handler)
+
+        if abort_flag["value"]:
+            self.log(f"→ Ctrl+Breakによりテスト実行を中断しました({len(results)}件実行)。")
+        else:
+            self.log(f"→ テスト実行が終わりました({len(results)}件実行)。")
 
     def _gui_on_step(self, step_number: int, total: int, step: dict) -> str:
         decision = {"value": "abort"}
         win = tk.Toplevel(self)
         win.title(f"ステップ {step_number}/{total}")
+        if self._step_dialog_pos is not None:
+            x, y = self._step_dialog_pos
+            win.geometry(f"+{x}+{y}")
         win.grab_set()
         ttk.Label(win, text=f"次のステップ({step_number}/{total}):").pack(
             anchor="w", padx=10, pady=(10, 2)
@@ -1530,6 +1565,9 @@ class RecorderApp(_AppBase):
 
         def choose(value: str) -> None:
             decision["value"] = value
+            # 次回ステップ実行画面も同じ位置に出す(毎回マウスを動かさずに
+            # 済むよう、閉じた時点の位置を覚えておく)
+            self._step_dialog_pos = (win.winfo_x(), win.winfo_y())
             win.destroy()
 
         btns = ttk.Frame(win)
@@ -1539,7 +1577,9 @@ class RecorderApp(_AppBase):
         ttk.Button(btns, text="スキップ", command=lambda: choose("skip")).pack(side="left", padx=4)
         ttk.Button(btns, text="中止", command=lambda: choose("abort")).pack(side="left", padx=4)
         win.bind("<Return>", lambda e: choose("step"))
+        win.bind("<F8>", lambda e: choose("step"))
         win.protocol("WM_DELETE_WINDOW", lambda: choose("abort"))
+        win.focus_force()
         win.wait_window()
         return decision["value"]
 
@@ -5859,6 +5899,21 @@ class RecorderApp(_AppBase):
         win = tk.Toplevel(self)
         win.title(f"手順{idx + 1}を編集: {step['handler']}.{step['action']}")
         win.grab_set()
+
+        number_row = ttk.Frame(win)
+        number_row.pack(anchor="w", padx=10, pady=(10, 0), fill="x")
+        ttk.Label(number_row, text="手順番号(この位置に移動):").pack(side="left")
+        total_steps = len(self.recorder.steps)
+        number_var = tk.StringVar(value=str(idx + 1))
+        ttk.Entry(number_row, textvariable=number_var, width=6).pack(side="left", padx=(6, 0))
+        ttk.Label(number_row, text=f"/ 全{total_steps}件", foreground="#557").pack(side="left", padx=(4, 0))
+        ttk.Label(
+            win,
+            text="番号を変更すると、その位置に挿入され、元々その位置以降にあった手順は"
+            "後ろへ1つずつずれます。",
+            foreground="#557", wraplength=440, justify="left",
+        ).pack(anchor="w", padx=10, pady=(2, 0))
+
         ttk.Label(
             win,
             text=f"{step['handler']}.{step['action']} のパラメータをJSON形式で編集できます。\n"
@@ -5880,13 +5935,38 @@ class RecorderApp(_AppBase):
             if not isinstance(new_params, dict):
                 messagebox.showerror("入力エラー", "paramsは {} 形式(オブジェクト)で入力してください。")
                 return
+            try:
+                new_number = int(number_var.get().strip())
+            except ValueError:
+                messagebox.showerror("入力エラー", "手順番号は数字で入力してください。")
+                return
             step["params"] = new_params
+
+            steps = self.recorder.steps
+            current_idx = steps.index(step)
+            if new_number != current_idx + 1:
+                steps.pop(current_idx)
+                target_idx = max(0, min(new_number - 1, len(steps)))
+                steps.insert(target_idx, step)
+                self._last_registered_index = None  # 並べ替え後は「元に戻す」を末尾基準にフォールバックさせる
+                final_idx = target_idx
+                for w in check_control_flow_integrity(steps):
+                    self.log(f"⚠ 制御構文の整合性チェック: {w}")
+            else:
+                final_idx = current_idx
+
             self.refresh_steps()
-            self.steps_listbox.selection_set(idx)
-            self.steps_listbox.see(idx)
+            self.steps_listbox.selection_set(final_idx)
+            self.steps_listbox.see(final_idx)
             self._on_step_selected()
             win.destroy()
-            self.log(f"→ 手順{idx + 1}のパラメータを更新しました: {step['handler']}.{step['action']}")
+            if final_idx != idx:
+                self.log(
+                    f"→ 手順{idx + 1}のパラメータを更新し、手順{final_idx + 1}へ移動しました: "
+                    f"{step['handler']}.{step['action']}"
+                )
+            else:
+                self.log(f"→ 手順{idx + 1}のパラメータを更新しました: {step['handler']}.{step['action']}")
 
         btns = ttk.Frame(win)
         btns.pack(pady=(0, 10))
