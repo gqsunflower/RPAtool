@@ -2028,11 +2028,7 @@ class MacroRecorder:
             return
         test_value, param_value = result
 
-        print("  スクロールする方向の順番を選んでください:")
-        print("    1) 右→下→左→上")
-        print("    2) 左→下→右→上")
-        order_choice = self._ask("  番号(空Enterで1): ").strip()
-        direction_order = "left_down_right_up" if order_choice == "2" else "right_down_left_up"
+        direction_order = self._ask_scroll_direction_order()
 
         conf_raw = self._ask(
             "  一致の緩さ(confidence)を0.1〜1.0で指定してください(空Enterで既定値0.8): "
@@ -3612,6 +3608,22 @@ class MacroRecorder:
             return "right", 1
         return "left", 1
 
+    def _ask_scroll_direction_order(self) -> str:
+        """scroll_until_image_found共通で使う、4方向を試す順番の選択。"""
+        print("  スクロールする方向の順番を選んでください:")
+        print("    1) 右→下→左→上(既定)")
+        print("    2) 左→下→右→上")
+        print("    3) 左→上→右→下")
+        print("    4) 右→上→左→下")
+        choice = self._ask("  番号(空Enterで1): ").strip()
+        if choice == "2":
+            return "left_down_right_up"
+        if choice == "3":
+            return "left_up_right_down"
+        if choice == "4":
+            return "right_up_left_down"
+        return "right_down_left_up"
+
     def _record_desktop_screenshot(self) -> None:
         result = self._ask_sluttable_value("保存先の画像パス")
         if result is None:
@@ -3803,11 +3815,7 @@ class MacroRecorder:
             return
         test_value, param_value = result
 
-        print("  スクロールする方向の順番を選んでください:")
-        print("    1) 右→下→左→上")
-        print("    2) 左→下→右→上")
-        order_choice = self._ask("  番号(空Enterで1): ").strip()
-        direction_order = "left_down_right_up" if order_choice == "2" else "right_down_left_up"
+        direction_order = self._ask_scroll_direction_order()
 
         conf_raw = self._ask(
             "  一致の緩さ(confidence)を0.1〜1.0で指定してください(空Enterで既定値0.8): "

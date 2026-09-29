@@ -70,11 +70,13 @@ def _xpath_literal(text: str) -> str:
 
 _SUPPORTED_BROWSERS = ("chrome", "edge")
 
-# scroll_until_image_found用: 4方向を試す順番の2パターンと、各方向の
+# scroll_until_image_found用: 4方向を試す順番の4パターンと、各方向の
 # window.scrollBy(x, y)向けの符号(右方向・下方向がプラス)。
 _SCROLL_DIRECTION_ORDERS: dict[str, list[str]] = {
     "right_down_left_up": ["right", "down", "left", "up"],
     "left_down_right_up": ["left", "down", "right", "up"],
+    "left_up_right_down": ["left", "up", "right", "down"],
+    "right_up_left_down": ["right", "up", "left", "down"],
 }
 _SCROLL_DELTAS: dict[str, tuple[int, int]] = {
     "down": (0, 1), "up": (0, -1), "right": (1, 0), "left": (-1, 0),
@@ -814,8 +816,10 @@ class BrowserHandler:
         クリックしようとすると対象のウィンドウの外、つまり別のウィンドウを
         誤ってクリックしてしまうことがあるための対策)。
 
-        direction_order: "right_down_left_up"(右→下→左→上)または
-        "left_down_right_up"(左→下→右→上)。ページが縦方向にしか
+        direction_order: "right_down_left_up"(右→下→左→上)、
+        "left_down_right_up"(左→下→右→上)、"left_up_right_down"
+        (左→上→右→下)、"right_up_left_down"(右→上→左→下)のいずれか。
+        ページが縦方向にしか
         スクロールしない場合、横方向のスクロールはスクロール位置に変化が
         無かった時点で早めにあきらめ、自動的に次の方向へ進む。
         """

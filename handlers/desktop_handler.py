@@ -212,10 +212,12 @@ def locate_text_on_screen_once(
     return (ox + lx, oy + ly, lw, lh)
 
 
-# scroll_until_image_found用: 4方向を試す順番の2パターン。
+# scroll_until_image_found用: 4方向を試す順番の4パターン。
 _SCROLL_DIRECTION_ORDERS: dict[str, list[str]] = {
     "right_down_left_up": ["right", "down", "left", "up"],
     "left_down_right_up": ["left", "down", "right", "up"],
+    "left_up_right_down": ["left", "up", "right", "down"],
+    "right_up_left_down": ["right", "up", "left", "down"],
 }
 
 
@@ -878,8 +880,10 @@ class DesktopHandler:
         しようとすると対象ウィンドウの外、つまり別のウィンドウを誤って
         クリックしてしまうことがあるための対策)。
 
-        direction_order: "right_down_left_up"(右→下→左→上)または
-        "left_down_right_up"(左→下→右→上)。横方向のスクロールに対応して
+        direction_order: "right_down_left_up"(右→下→左→上)、
+        "left_down_right_up"(左→下→右→上)、"left_up_right_down"
+        (左→上→右→下)、"right_up_left_down"(右→上→左→下)のいずれか。
+        横方向のスクロールに対応して
         いないページ・ウィンドウ(縦にしかスクロールしない場合等)では、
         その方向へスクロールしても画面に変化が2回連続で無かった時点で
         あきらめ、自動的に次の方向へ進む(1回だけで判定すると、単調な

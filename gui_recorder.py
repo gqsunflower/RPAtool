@@ -3833,6 +3833,12 @@ class RecorderApp(_AppBase):
             ttk.Radiobutton(
                 f, text="左→下→右→上", variable=order_var, value="left_down_right_up",
             ).pack(anchor="w")
+            ttk.Radiobutton(
+                f, text="左→上→右→下", variable=order_var, value="left_up_right_down",
+            ).pack(anchor="w")
+            ttk.Radiobutton(
+                f, text="右→上→左→下", variable=order_var, value="right_up_left_down",
+            ).pack(anchor="w")
             conf_field = PlainField(f, "一致の緩さ(confidence, 0.1〜1.0)", default="0.8")
             conf_field.pack(fill="x", pady=4)
             click_field = BoolField(f, "見つけた位置をクリックする(オフの場合は移動のみ)")
@@ -4894,6 +4900,12 @@ class RecorderApp(_AppBase):
             ).pack(anchor="w")
             ttk.Radiobutton(
                 f, text="左→下→右→上", variable=order_var, value="left_down_right_up",
+            ).pack(anchor="w")
+            ttk.Radiobutton(
+                f, text="左→上→右→下", variable=order_var, value="left_up_right_down",
+            ).pack(anchor="w")
+            ttk.Radiobutton(
+                f, text="右→上→左→下", variable=order_var, value="right_up_left_down",
             ).pack(anchor="w")
             conf_field = PlainField(f, "一致の緩さ(confidence, 0.1〜1.0)", default="0.8")
             conf_field.pack(fill="x", pady=4)
