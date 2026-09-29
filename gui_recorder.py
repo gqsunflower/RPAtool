@@ -1072,7 +1072,7 @@ class RecorderApp(_AppBase):
         self.insert_before_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             steps_frame, text="選択した手順の直前に、新しく登録する手順を挿入する"
-            "(オフなら末尾に追加)",
+            "(オフなら選択した手順のすぐ下に挿入。何も選択していなければ末尾に追加)",
             variable=self.insert_before_var,
         ).pack(anchor="w", pady=(4, 0))
 
@@ -1126,6 +1126,7 @@ class RecorderApp(_AppBase):
         "move_to_image": (("image_path", ""),),
         "click_offset_from_image": (("image_path", ""),),
         "click_between_images": (("image_path_a", "A: "), ("image_path_b", "B: ")),
+        "scroll_until_image_found": (("image_path", ""),),
     }
 
     def _on_step_selected(self, event=None) -> None:
@@ -1203,14 +1204,15 @@ class RecorderApp(_AppBase):
         """手順を登録する。value を渡すと(store_asが設定されている場合)、
         記録時点で確認できた実値として変数一覧パネルにも反映する。
 
-        「選択した手順の直前に挿入する」がONで、手順一覧で何か選択されて
-        いる場合は、末尾への追加ではなくその位置に挿入する。挿入した場合は
-        続けて登録する手順が自然に後ろへ積み上がるよう、選択位置を1つ
-        後ろへ進める。
+        手順一覧で何か選択されている場合、「選択した手順の直前に挿入する」が
+        ONならその直前に、OFF(既定)ならその直後に挿入する(末尾への追加では
+        なくなる)。挿入した場合は、続けて登録する手順が自然に後ろへ積み
+        上がるよう選択位置を更新する。何も選択されていなければ、従来通り
+        末尾に追加する。
         """
-        insert_mode = self.insert_before_var.get()
-        sel = self.steps_listbox.curselection() if insert_mode else ()
-        idx = sel[0] if sel else len(self.recorder.steps)
+        insert_before = self.insert_before_var.get()
+        sel = self.steps_listbox.curselection()
+        idx = (sel[0] if insert_before else sel[0] + 1) if sel else len(self.recorder.steps)
         self.recorder.steps.insert(idx, step)
         self._last_registered_index = idx
 
@@ -1220,8 +1222,8 @@ class RecorderApp(_AppBase):
             self.refresh_variables()
         self.refresh_steps()
 
-        if insert_mode:
-            next_idx = idx + 1
+        if sel:
+            next_idx = idx + 1 if insert_before else idx
             self.steps_listbox.selection_clear(0, "end")
             if next_idx < len(self.recorder.steps):
                 self.steps_listbox.selection_set(next_idx)
@@ -5869,6 +5871,11 @@ class RecorderApp(_AppBase):
         self._last_registered_index = None
         self._cleanup_after_step_removed(removed)
         self.refresh_steps()
+        if self.recorder.steps:
+            next_idx = min(idx, len(self.recorder.steps) - 1)
+            self.steps_listbox.selection_set(next_idx)
+            self.steps_listbox.see(next_idx)
+            self._on_step_selected()
         self.log(f"直前の操作を取り消しました(手順{idx + 1}): {removed['handler']}.{removed['action']}")
 
     def _delete_selected_step(self) -> None:
@@ -5886,6 +5893,14 @@ class RecorderApp(_AppBase):
         self._last_registered_index = None
         self._cleanup_after_step_removed(removed)
         self.refresh_steps()
+        # 削除で一覧がリセットされ、毎回先頭までスクロールし直す羽目になるのを
+        # 防ぐため、削除した位置と同じ位置(繰り上がった次の手順)を選択し直して
+        # その場所が見える状態を保つ。
+        if self.recorder.steps:
+            next_idx = min(idx, len(self.recorder.steps) - 1)
+            self.steps_listbox.selection_set(next_idx)
+            self.steps_listbox.see(next_idx)
+            self._on_step_selected()
         self.log(f"→ 手順{idx + 1}を削除しました: {removed['handler']}.{removed['action']}")
 
     def _edit_selected_step_params(self) -> None:
