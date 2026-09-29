@@ -1008,6 +1008,7 @@ class RecorderApp(_AppBase):
         bottom.pack(side="bottom", fill="x", pady=(4, 0))
         ttk.Button(bottom, text="元に戻す(直前の操作を取り消す)", command=self._undo).pack(side="left")
         ttk.Button(bottom, text="保存して終了", command=self._finish).pack(side="right")
+        ttk.Button(bottom, text="上書き保存", command=self._save_overwrite).pack(side="right", padx=6)
         ttk.Button(bottom, text="中止(保存しない)", command=self._cancel_all).pack(side="right", padx=6)
 
         # フォーム内容が長い操作(OCR文字検索の領域指定+一覧表示等)だと、
@@ -6001,6 +6002,15 @@ class RecorderApp(_AppBase):
         ttk.Button(btns, text="キャンセル", command=win.destroy).pack(side="left", padx=4)
 
     def _finish(self) -> None:
+        self._open_save_dialog(close_after=True)
+
+    def _save_overwrite(self) -> None:
+        """記録を続けたまま、今の内容をそのまま保存する(作業中のチェックポイント用)。
+        「保存して終了」と違い、ブラウザ/Excelは閉じずウィンドウも閉じない。
+        """
+        self._open_save_dialog(close_after=False)
+
+    def _open_save_dialog(self, close_after: bool) -> None:
         if not self.recorder.steps:
             messagebox.showinfo("保存できません", "まだ何も記録されていません。")
             return
@@ -6012,7 +6022,7 @@ class RecorderApp(_AppBase):
             existing_desc, existing_keywords = "", []
 
         win = tk.Toplevel(self)
-        win.title("保存")
+        win.title("保存" if close_after else "上書き保存")
         win.grab_set()
         if loaded_name:
             ttk.Label(
@@ -6028,6 +6038,12 @@ class RecorderApp(_AppBase):
         ttk.Label(win, text="呼び出しキーワード(カンマ区切り):").pack(anchor="w", padx=10, pady=(10, 0))
         kw_var = tk.StringVar(value=", ".join(existing_keywords))
         ttk.Entry(win, textvariable=kw_var, width=40).pack(padx=10)
+        if not close_after:
+            ttk.Label(
+                win, text="※ 保存してもウィンドウは閉じず、ブラウザ/Excelも開いたまま"
+                "記録を続けられます。",
+                foreground="#557", wraplength=320, justify="left",
+            ).pack(anchor="w", padx=10, pady=(6, 0))
 
         def do_save():
             macro_name = name_var.get().strip()
@@ -6037,28 +6053,34 @@ class RecorderApp(_AppBase):
                 messagebox.showwarning("入力不足", "保存名を入力してください")
                 return
 
-            if self.recorder._site_opened:
-                self.recorder.browser.close()
-                self.recorder.steps.append({"handler": "browser", "action": "close", "params": {}})
-            try:
-                self.recorder.excel.close()
-            except Exception:  # noqa: BLE001
-                pass
+            steps_to_save = self.recorder.steps
+            if close_after:
+                if self.recorder._site_opened:
+                    self.recorder.browser.close()
+                    self.recorder.steps.append({"handler": "browser", "action": "close", "params": {}})
+                try:
+                    self.recorder.excel.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
             macro_def = {
                 "description": description,
                 "required_slots": self.recorder.required_slots,
-                "steps": self.recorder.steps,
+                "steps": steps_to_save,
             }
-            if any(s.get("handler") == "browser" for s in self.recorder.steps):
+            if any(s.get("handler") == "browser" for s in steps_to_save):
                 # このマクロを記録したときに使っていたブラウザ(chrome/edge)を保存し、
                 # 実行時にこのマクロだけ自動でそのブラウザに切り替わるようにする。
                 macro_def["browser"] = self.recorder.browser.browser
             self.recorder._save_macro(macro_name, macro_def)
             self.recorder._save_intent(macro_name, description, keywords)
+            self.recorder.loaded_macro_name = macro_name
             win.destroy()
-            messagebox.showinfo("保存しました", f"マクロ '{macro_name}' を保存しました。")
-            self.destroy()
+            if close_after:
+                messagebox.showinfo("保存しました", f"マクロ '{macro_name}' を保存しました。")
+                self.destroy()
+            else:
+                self.log(f"→ マクロ '{macro_name}' を上書き保存しました(記録を続けられます)。")
 
         ttk.Button(win, text="保存する", command=do_save).pack(pady=12)
 
