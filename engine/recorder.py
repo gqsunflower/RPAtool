@@ -3351,6 +3351,10 @@ class MacroRecorder:
             print("  17) 今のマウス位置でクリックする(座標や画像の指定なし)")
             print("      (先に「画面上の画像を探してマウスを移動する」等で位置を")
             print("      合わせておき、間に待機を挟んでから改めてクリックしたい場合)")
+            print("  18) 画像が表示されるまで待機する")
+            print("  19) 画像が消えるまで待機する")
+            print("  20) 特定の色が出るまで待機する(領域内のいずれかのピクセルが対象)")
+            print("  21) 特定の色が消えるまで待機する")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -3389,10 +3393,18 @@ class MacroRecorder:
                 self._record_desktop_click_text_ocr()
             elif choice == "17":
                 self._record_desktop_click_current_position()
+            elif choice == "18":
+                self._record_desktop_wait_for_image()
+            elif choice == "19":
+                self._record_desktop_wait_for_image_disappear()
+            elif choice == "20":
+                self._record_desktop_wait_for_color()
+            elif choice == "21":
+                self._record_desktop_wait_for_color_disappear()
             elif choice == "0":
                 return
             else:
-                print("0〜17のいずれかを入力してください。\n")
+                print("0〜21のいずれかを入力してください。\n")
 
     def _record_desktop_set_zoom(self) -> None:
         print("  ※ 今アクティブなウィンドウ(通常はブラウザ)が対象です。事前に")
@@ -3571,6 +3583,47 @@ class MacroRecorder:
             print("  数字で入力してください。画面全体を対象にします。\n")
             return None
         return [left, top, width, height]
+
+    def _ask_required_region(self) -> list[int]:
+        """色の待機用: 監視する領域を必ず指定させる。画面全体をピクセル単位で
+        毎回走査するのは非現実的に遅いため、色の待機では画面全体という
+        選択肢自体を用意していない。
+        """
+        try:
+            screen = self.desktop.get_screen_size()
+            print(f"  (参考: 画面解像度 {screen['width']}x{screen['height']})")
+        except Exception:  # noqa: BLE001
+            pass
+        print("  色の監視は領域の指定が必須です(画面全体は走査が遅すぎるため非対応)。")
+        print("  領域の左上を基準(0,0)として、幅・高さをピクセルで指定してください。")
+        while True:
+            try:
+                left = int(self._ask("  領域の左端のX座標: "))
+                top = int(self._ask("  領域の上端のY座標: "))
+                width = int(self._ask("  領域の幅(ピクセル): "))
+                height = int(self._ask("  領域の高さ(ピクセル): "))
+                return [left, top, width, height]
+            except ValueError:
+                print("  数字で入力してください。\n")
+
+    def _ask_color(self) -> list[int]:
+        print("  色をRGB(各0〜255)で指定してください。")
+        try:
+            r = int(self._ask("  R: "))
+            g = int(self._ask("  G: "))
+            b = int(self._ask("  B: "))
+        except ValueError:
+            print("  数字で入力してください。既定色(黒、0,0,0)にします。\n")
+            return [0, 0, 0]
+        clamp = lambda v: max(0, min(255, v))  # noqa: E731
+        return [clamp(r), clamp(g), clamp(b)]
+
+    def _ask_color_tolerance(self) -> int:
+        raw = self._ask("  色の揺らぎ(許容差、0〜255。空Enterで既定値20): ").strip()
+        try:
+            return max(0, min(255, int(raw))) if raw else 20
+        except ValueError:
+            return 20
 
     def _ask_ocr_psm(self) -> str:
         """OCR(Tesseract)のページ分割モード(PSM)を選ばせる。対象の見た目
@@ -4012,6 +4065,168 @@ class MacroRecorder:
             print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠ {e}\n")
+
+    def _record_desktop_wait_for_image(self) -> None:
+        print("  ※ 画面上(領域を絞ればその中だけ)に指定した画像が表示されるまで")
+        print("     待ちます。ボタンが有効になる/読み込みが終わる等のタイミング")
+        print("     待ちに使います。")
+        result = self._ask_sluttable_value("表示を待ちたい画像ファイルのパス")
+        if result is None:
+            print("  → キャンセルしました。\n")
+            return
+        test_value, param_value = result
+
+        conf_raw = self._ask(
+            "  一致の緩さ(confidence)を0.1〜1.0で指定してください(空Enterで既定値0.8): "
+        )
+        try:
+            confidence = float(conf_raw) if conf_raw else 0.8
+        except ValueError:
+            confidence = 0.8
+        timeout_raw = self._ask("  最大何秒待ちますか?(空Enterで既定値15): ").strip()
+        try:
+            timeout = float(timeout_raw) if timeout_raw else 15.0
+        except ValueError:
+            timeout = 15.0
+        region = self._ask_desktop_region()
+
+        params = {
+            "image_path": param_value, "confidence": confidence, "timeout": timeout, "region": region,
+        }
+        try:
+            result_msg = self.desktop.wait_for_image(test_value, confidence=confidence, timeout=timeout, region=region)
+            print(f"  → 実際に表示を確認できました: {result_msg}")
+            retry_cfg = self._ask_retry()
+            self.steps.append({
+                "handler": "desktop", "action": "wait_for_image",
+                "params": params, "verify": {"type": "none"}, "verify_skip": False, "retry": retry_cfg,
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}")
+            if self._ask("  それでもこの手順として登録しますか? (y/N): ").lower() == "y":
+                self.steps.append({
+                    "handler": "desktop", "action": "wait_for_image",
+                    "params": params, "verify": {"type": "none"}, "verify_skip": False,
+                })
+                print("  → 未確認のまま登録しました。\n")
+            else:
+                print("  → 登録しませんでした。メニューに戻ります。\n")
+
+    def _record_desktop_wait_for_image_disappear(self) -> None:
+        print("  ※ 画面上(領域を絞ればその中だけ)から指定した画像が消えるまで")
+        print("     待ちます。読み込み中の表示が消える等のタイミング待ちに使います。")
+        result = self._ask_sluttable_value("消えるのを待ちたい画像ファイルのパス")
+        if result is None:
+            print("  → キャンセルしました。\n")
+            return
+        test_value, param_value = result
+
+        conf_raw = self._ask(
+            "  一致の緩さ(confidence)を0.1〜1.0で指定してください(空Enterで既定値0.8): "
+        )
+        try:
+            confidence = float(conf_raw) if conf_raw else 0.8
+        except ValueError:
+            confidence = 0.8
+        timeout_raw = self._ask("  最大何秒待ちますか?(空Enterで既定値15): ").strip()
+        try:
+            timeout = float(timeout_raw) if timeout_raw else 15.0
+        except ValueError:
+            timeout = 15.0
+        region = self._ask_desktop_region()
+
+        params = {
+            "image_path": param_value, "confidence": confidence, "timeout": timeout, "region": region,
+        }
+        try:
+            result_msg = self.desktop.wait_for_image_disappear(
+                test_value, confidence=confidence, timeout=timeout, region=region,
+            )
+            print(f"  → 実際に消えたことを確認できました: {result_msg}")
+            retry_cfg = self._ask_retry()
+            self.steps.append({
+                "handler": "desktop", "action": "wait_for_image_disappear",
+                "params": params, "verify": {"type": "none"}, "verify_skip": False, "retry": retry_cfg,
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}")
+            if self._ask("  それでもこの手順として登録しますか? (y/N): ").lower() == "y":
+                self.steps.append({
+                    "handler": "desktop", "action": "wait_for_image_disappear",
+                    "params": params, "verify": {"type": "none"}, "verify_skip": False,
+                })
+                print("  → 未確認のまま登録しました。\n")
+            else:
+                print("  → 登録しませんでした。メニューに戻ります。\n")
+
+    def _record_desktop_wait_for_color(self) -> None:
+        print("  ※ 指定した領域内のいずれかのピクセルが、指定した色(揺らぎの")
+        print("     範囲内)になるまで待ちます。ステータス表示が特定の色に")
+        print("     変わるのを待つ場合等に使います。")
+        region = self._ask_required_region()
+        color = self._ask_color()
+        tolerance = self._ask_color_tolerance()
+        timeout_raw = self._ask("  最大何秒待ちますか?(空Enterで既定値15): ").strip()
+        try:
+            timeout = float(timeout_raw) if timeout_raw else 15.0
+        except ValueError:
+            timeout = 15.0
+
+        params = {"region": region, "color": color, "tolerance": tolerance, "timeout": timeout}
+        try:
+            result_msg = self.desktop.wait_for_color(region, color, tolerance=tolerance, timeout=timeout)
+            print(f"  → 実際に検知できました: {result_msg}")
+            retry_cfg = self._ask_retry()
+            self.steps.append({
+                "handler": "desktop", "action": "wait_for_color",
+                "params": params, "verify": {"type": "none"}, "verify_skip": False, "retry": retry_cfg,
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}")
+            if self._ask("  それでもこの手順として登録しますか? (y/N): ").lower() == "y":
+                self.steps.append({
+                    "handler": "desktop", "action": "wait_for_color",
+                    "params": params, "verify": {"type": "none"}, "verify_skip": False,
+                })
+                print("  → 未確認のまま登録しました。\n")
+            else:
+                print("  → 登録しませんでした。メニューに戻ります。\n")
+
+    def _record_desktop_wait_for_color_disappear(self) -> None:
+        print("  ※ 指定した領域内から、指定した色(揺らぎの範囲内)のピクセルが")
+        print("     1つも無くなるまで待ちます。")
+        region = self._ask_required_region()
+        color = self._ask_color()
+        tolerance = self._ask_color_tolerance()
+        timeout_raw = self._ask("  最大何秒待ちますか?(空Enterで既定値15): ").strip()
+        try:
+            timeout = float(timeout_raw) if timeout_raw else 15.0
+        except ValueError:
+            timeout = 15.0
+
+        params = {"region": region, "color": color, "tolerance": tolerance, "timeout": timeout}
+        try:
+            result_msg = self.desktop.wait_for_color_disappear(region, color, tolerance=tolerance, timeout=timeout)
+            print(f"  → 実際に消えたことを確認できました: {result_msg}")
+            retry_cfg = self._ask_retry()
+            self.steps.append({
+                "handler": "desktop", "action": "wait_for_color_disappear",
+                "params": params, "verify": {"type": "none"}, "verify_skip": False, "retry": retry_cfg,
+            })
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}")
+            if self._ask("  それでもこの手順として登録しますか? (y/N): ").lower() == "y":
+                self.steps.append({
+                    "handler": "desktop", "action": "wait_for_color_disappear",
+                    "params": params, "verify": {"type": "none"}, "verify_skip": False,
+                })
+                print("  → 未確認のまま登録しました。\n")
+            else:
+                print("  → 登録しませんでした。メニューに戻ります。\n")
 
     def _record_desktop_type(self) -> None:
         result = self._ask_sluttable_value("入力する文字列")

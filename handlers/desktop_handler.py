@@ -46,6 +46,10 @@ class WindowNotFoundError(Exception):
     pass
 
 
+class ColorNotFoundError(Exception):
+    pass
+
+
 # set_zoom用: 主要ブラウザがCtrl+プラス/マイナスキーで刻む標準的な表示倍率(%)
 _ZOOM_LEVELS = [25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500]
 
@@ -1063,6 +1067,99 @@ class DesktopHandler:
         """
         self._locate(image_path, confidence, timeout, region=region)
         return f"appeared: {image_path}"
+
+    def wait_for_image_disappear(
+        self,
+        image_path: str,
+        confidence: float = 0.8,
+        timeout: float = 15,
+        region: tuple[int, int, int, int] | list[int] | None = None,
+    ) -> str:
+        """画面上(regionを指定した場合はその矩形領域内だけ)から画像が消える
+        まで待つ。既に表示されていない場合は即座に成功として返る。
+        """
+        gui = self._gui()
+        norm_region = self._normalize_region(region)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                locate_image_on_screen_once(gui, image_path, confidence, norm_region)
+            except ImageNotFoundError:
+                return f"disappeared: {image_path}"
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.5)
+        raise ImageNotFoundError(
+            f"{timeout}秒待ちましたが、画像が消えませんでした: {image_path}"
+        )
+
+    @staticmethod
+    def _color_matches(pixel: tuple[int, int, int], target: tuple[int, int, int], tolerance: int) -> bool:
+        """RGB各チャンネルの差の最大値がtolerance以内かどうかで、色が
+        「同じ色の揺らぎの範囲内」かを判定する(単純だが直感的でわかりやすいため)。
+        """
+        return all(abs(pixel[i] - target[i]) <= tolerance for i in range(3))
+
+    def _region_pixels(self, region: tuple[int, int, int, int] | list[int] | None):
+        """指定領域をスクリーンショットし、RGBピクセルの並びを返す。
+        画面全体を毎回ピクセル単位で走査するのは非現実的に遅いため、
+        色の待機ではregionの指定を必須にしている。
+        """
+        norm_region = self._normalize_region(region)
+        if norm_region is None:
+            raise ValueError("色の待機には、監視する領域(region)の指定が必須です")
+        gui = self._gui()
+        img = gui.screenshot(region=norm_region)
+        return img.convert("RGB").getdata()
+
+    def wait_for_color(
+        self,
+        region: tuple[int, int, int, int] | list[int],
+        color: tuple[int, int, int] | list[int],
+        tolerance: int = 20,
+        timeout: float = 15,
+    ) -> str:
+        """指定した領域内に、指定した色(±toleranceの揺らぎ)を持つピクセルが
+        1つでも現れるまで待つ。regionは (left, top, width, height) を
+        ピクセルで指定する(画面全体対象は非対応。走査が遅すぎるため)。
+        """
+        target = tuple(int(c) for c in color)
+        deadline = time.monotonic() + timeout
+        while True:
+            pixels = self._region_pixels(region)
+            if any(self._color_matches(px, target, tolerance) for px in pixels):
+                return f"color appeared: {target}(許容差{tolerance}) in region {region}"
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.5)
+        raise ColorNotFoundError(
+            f"{timeout}秒待ちましたが、指定した色は領域内に現れませんでした: "
+            f"{target}(許容差{tolerance}, region={region})"
+        )
+
+    def wait_for_color_disappear(
+        self,
+        region: tuple[int, int, int, int] | list[int],
+        color: tuple[int, int, int] | list[int],
+        tolerance: int = 20,
+        timeout: float = 15,
+    ) -> str:
+        """指定した領域内から、指定した色(±toleranceの揺らぎ)を持つピクセルが
+        1つも無くなるまで待つ。既に無い場合は即座に成功として返る。
+        """
+        target = tuple(int(c) for c in color)
+        deadline = time.monotonic() + timeout
+        while True:
+            pixels = self._region_pixels(region)
+            if not any(self._color_matches(px, target, tolerance) for px in pixels):
+                return f"color disappeared: {target}(許容差{tolerance}) in region {region}"
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.5)
+        raise ColorNotFoundError(
+            f"{timeout}秒待ちましたが、指定した色が領域内から消えませんでした: "
+            f"{target}(許容差{tolerance}, region={region})"
+        )
 
     # ---------- 操作後の成功確認(Executorのverify機構と連携) ----------
     # value は "画像パス" または "画像パス|confidence" の形式を受け付ける。

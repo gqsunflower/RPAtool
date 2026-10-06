@@ -27,7 +27,7 @@ import time
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
+from tkinter import colorchooser, filedialog, messagebox, scrolledtext, simpledialog, ttk
 from typing import Any
 
 from openpyxl.utils import column_index_from_string, get_column_letter
@@ -188,6 +188,8 @@ DOMAIN_ACTIONS = {
         "表示倍率(ズーム)を指定する(キー操作)",
         "画像を基準にずらした位置をクリックする", "画像2つの間の位置(%)をクリックする",
         "画像が見つかるまでスクロールして探す", "待機する", "OCRで文字を探してクリックする",
+        "画像が表示されるまで待機する", "画像が消えるまで待機する",
+        "特定の色が出るまで待機する", "特定の色が消えるまで待機する",
     ],
     "text": [
         "文字を探して切り出す", "文字を置換する", "日付・時刻を取得する",
@@ -466,6 +468,279 @@ class ClickTypeField(ttk.Frame):
             if choice_label == selected:
                 return button, clicks
         return "left", 1
+
+
+def _make_hue_strip_image(width: int, height: int):
+    """縦方向に色相(Hue)0〜360度をフルスペクトルで並べたグラデーション画像を作る。
+    numpyがあれば(opencv-python経由でほぼ常に入っている)ベクトル化して高速に、
+    無ければ1ピクセルずつ計算する(遅いが動作はする)。
+    """
+    from PIL import Image
+    try:
+        import numpy as np
+        hue = np.linspace(0, 255, height, dtype=np.uint8)
+        hsv = np.zeros((height, width, 3), dtype=np.uint8)
+        hsv[:, :, 0] = hue[:, None]
+        hsv[:, :, 1] = 255
+        hsv[:, :, 2] = 255
+        return Image.fromarray(hsv, mode="HSV").convert("RGB")
+    except ImportError:
+        img = Image.new("HSV", (width, height))
+        px = img.load()
+        for y in range(height):
+            hue_byte = int(y / max(height - 1, 1) * 255)
+            for x in range(width):
+                px[x, y] = (hue_byte, 255, 255)
+        return img.convert("RGB")
+
+
+def _make_sv_square_image(hue_byte: int, size: int):
+    """指定した色相(Hue、0〜255)における、彩度(横)×明度(縦、下が暗い)の
+    グラデーション正方形画像を作る(2D)。ヒュー(Hue)ストリップと組み合わせて
+    使う典型的なHSVカラーピッカーの構成。
+    """
+    from PIL import Image
+    try:
+        import numpy as np
+        sat = np.linspace(0, 255, size, dtype=np.uint8)
+        val = np.linspace(255, 0, size, dtype=np.uint8)
+        hsv = np.zeros((size, size, 3), dtype=np.uint8)
+        hsv[:, :, 0] = hue_byte
+        hsv[:, :, 1] = sat[None, :]
+        hsv[:, :, 2] = val[:, None]
+        return Image.fromarray(hsv, mode="HSV").convert("RGB")
+    except ImportError:
+        img = Image.new("HSV", (size, size))
+        px = img.load()
+        for y in range(size):
+            v = 255 - int(y / max(size - 1, 1) * 255)
+            for x in range(size):
+                s = int(x / max(size - 1, 1) * 255)
+                px[x, y] = (hue_byte, s, v)
+        return img.convert("RGB")
+
+
+class ColorPalettePicker(tk.Toplevel):
+    """色の待機アクション用: グラデーション(HSVカラーピッカー)で色を選びつつ、
+    その場で「揺らぎ(許容差)」もスライダーで指定できるダイアログ。
+    OKを押すと on_ok(r, g, b, tolerance) を呼んでから閉じる。
+    """
+
+    SV_SIZE = 200
+    HUE_W = 30
+
+    def __init__(self, parent, initial_color=(255, 0, 0), initial_tolerance: int = 20, on_ok=None):
+        super().__init__(parent)
+        self.title("パレットから色を選ぶ")
+        self.grab_set()
+        self.on_ok = on_ok
+
+        import colorsys
+        r, g, b = (c / 255 for c in initial_color)
+        self.hue, self.sat, self.val = colorsys.rgb_to_hsv(r, g, b)
+
+        main = ttk.Frame(self, padding=10)
+        main.pack()
+
+        self.sv_canvas = tk.Canvas(
+            main, width=self.SV_SIZE, height=self.SV_SIZE, cursor="crosshair", highlightthickness=1,
+        )
+        self.sv_canvas.grid(row=0, column=0, padx=(0, 8))
+        self.sv_canvas.bind("<Button-1>", self._on_sv_pick)
+        self.sv_canvas.bind("<B1-Motion>", self._on_sv_pick)
+
+        self.hue_canvas = tk.Canvas(
+            main, width=self.HUE_W, height=self.SV_SIZE, cursor="sb_v_double_arrow", highlightthickness=1,
+        )
+        self.hue_canvas.grid(row=0, column=1, padx=(0, 8))
+        self.hue_canvas.bind("<Button-1>", self._on_hue_pick)
+        self.hue_canvas.bind("<B1-Motion>", self._on_hue_pick)
+
+        right = ttk.Frame(main)
+        right.grid(row=0, column=2, sticky="n")
+        self.preview = tk.Label(right, width=12, height=4, relief="sunken")
+        self.preview.pack(pady=(0, 6))
+        self.rgb_label = ttk.Label(right, text="")
+        self.rgb_label.pack()
+
+        ttk.Label(right, text="色の揺らぎ(許容差、0〜255):").pack(anchor="w", pady=(14, 0))
+        self.tol_var = tk.IntVar(value=int(initial_tolerance))
+        self.tol_scale = ttk.Scale(
+            right, from_=0, to=255, orient="horizontal", length=160,
+            variable=self.tol_var, command=lambda _v: self._on_tolerance_changed(),
+        )
+        self.tol_scale.pack(fill="x")
+        self.tol_label = ttk.Label(right, text="")
+        self.tol_label.pack(anchor="w")
+
+        btns = ttk.Frame(self)
+        btns.pack(pady=(0, 10))
+        ttk.Button(btns, text="OK", command=self._confirm).pack(side="left", padx=4)
+        ttk.Button(btns, text="キャンセル", command=self.destroy).pack(side="left", padx=4)
+
+        self._hue_photo = None
+        self._sv_photo = None
+        self._render_hue_strip()
+        self._render_sv_square()
+        self._update_preview()
+        self._on_tolerance_changed()
+
+    def _render_hue_strip(self) -> None:
+        from PIL import ImageTk
+        img = _make_hue_strip_image(self.HUE_W, self.SV_SIZE)
+        self._hue_photo = ImageTk.PhotoImage(img)
+        self.hue_canvas.delete("all")
+        self.hue_canvas.create_image(0, 0, anchor="nw", image=self._hue_photo)
+        self._draw_hue_marker()
+
+    def _draw_hue_marker(self) -> None:
+        self.hue_canvas.delete("marker")
+        y = self.hue * self.SV_SIZE
+        self.hue_canvas.create_line(0, y, self.HUE_W, y, fill="white", width=3, tags="marker")
+        self.hue_canvas.create_line(0, y, self.HUE_W, y, fill="black", width=1, tags="marker")
+
+    def _render_sv_square(self) -> None:
+        from PIL import ImageTk
+        hue_byte = int(self.hue * 255)
+        img = _make_sv_square_image(hue_byte, self.SV_SIZE)
+        self._sv_photo = ImageTk.PhotoImage(img)
+        self.sv_canvas.delete("all")
+        self.sv_canvas.create_image(0, 0, anchor="nw", image=self._sv_photo)
+        self._draw_sv_marker()
+
+    def _draw_sv_marker(self) -> None:
+        self.sv_canvas.delete("marker")
+        x = self.sat * self.SV_SIZE
+        y = (1 - self.val) * self.SV_SIZE
+        radius = 5
+        self.sv_canvas.create_oval(
+            x - radius, y - radius, x + radius, y + radius, outline="white", width=2, tags="marker",
+        )
+        self.sv_canvas.create_oval(
+            x - radius, y - radius, x + radius, y + radius, outline="black", width=1, tags="marker",
+        )
+
+    def _on_hue_pick(self, event) -> None:
+        y = max(0, min(self.SV_SIZE - 1, event.y))
+        self.hue = y / self.SV_SIZE
+        self._render_sv_square()
+        self._draw_hue_marker()
+        self._update_preview()
+
+    def _on_sv_pick(self, event) -> None:
+        x = max(0, min(self.SV_SIZE - 1, event.x))
+        y = max(0, min(self.SV_SIZE - 1, event.y))
+        self.sat = x / self.SV_SIZE
+        self.val = 1 - y / self.SV_SIZE
+        self._draw_sv_marker()
+        self._update_preview()
+
+    def _current_rgb(self) -> tuple[int, int, int]:
+        import colorsys
+        r, g, b = colorsys.hsv_to_rgb(self.hue, self.sat, self.val)
+        return int(r * 255), int(g * 255), int(b * 255)
+
+    def _update_preview(self) -> None:
+        r, g, b = self._current_rgb()
+        self.preview.configure(background="#%02x%02x%02x" % (r, g, b))
+        self.rgb_label.configure(text=f"RGB({r}, {g}, {b})")
+
+    def _on_tolerance_changed(self) -> None:
+        self.tol_label.configure(text=f"±{int(self.tol_var.get())}")
+
+    def _confirm(self) -> None:
+        r, g, b = self._current_rgb()
+        tolerance = int(self.tol_var.get())
+        if self.on_ok:
+            self.on_ok(r, g, b, tolerance)
+        self.destroy()
+
+
+class ColorField(ttk.Frame):
+    """色の待機アクション共通の「色+揺らぎ」の入力欄。
+    「単色を指定」(OS標準のカラーピッカー。揺らぎは数値で別途指定)と
+    「パレット(グラデーション)で指定」(ColorPalettePickerを開き、色と
+    揺らぎを1つの画面でまとめて指定)の2通りから選べる。
+    get()は(r, g, b, tolerance)のタプルを返す。
+    """
+
+    def __init__(self, parent, label: str = "検知したい色"):
+        super().__init__(parent)
+        self.color: tuple[int, int, int] = (255, 0, 0)
+
+        ttk.Label(self, text=label, anchor="w").pack(anchor="w")
+        mode_row = ttk.Frame(self)
+        mode_row.pack(anchor="w", pady=(2, 4))
+        self.mode_var = tk.StringVar(value="single")
+        ttk.Radiobutton(
+            mode_row, text="単色を指定", variable=self.mode_var, value="single",
+            command=self._on_mode_changed,
+        ).pack(side="left", padx=(0, 10))
+        ttk.Radiobutton(
+            mode_row, text="パレット(グラデーション)で指定", variable=self.mode_var, value="palette",
+            command=self._on_mode_changed,
+        ).pack(side="left")
+
+        pick_row = ttk.Frame(self)
+        pick_row.pack(anchor="w", fill="x", pady=(0, 4))
+        self.swatch = tk.Label(pick_row, width=4, relief="sunken", background=self._to_hex(self.color))
+        self.swatch.pack(side="left")
+        self.rgb_label = ttk.Label(pick_row, text=self._rgb_text())
+        self.rgb_label.pack(side="left", padx=(6, 0))
+        self.single_btn = ttk.Button(pick_row, text="色を選択...", command=self._pick_single)
+        self.palette_btn = ttk.Button(pick_row, text="パレットを開く...", command=self._pick_palette)
+
+        tol_row = ttk.Frame(self)
+        tol_row.pack(anchor="w", fill="x", pady=(2, 0))
+        ttk.Label(tol_row, text="色の揺らぎ(許容差、0〜255):").pack(side="left")
+        self.tolerance_var = tk.StringVar(value="20")
+        ttk.Entry(tol_row, textvariable=self.tolerance_var, width=6).pack(side="left", padx=(6, 0))
+
+        self._on_mode_changed()
+
+    def _on_mode_changed(self) -> None:
+        self.single_btn.pack_forget()
+        self.palette_btn.pack_forget()
+        if self.mode_var.get() == "single":
+            self.single_btn.pack(side="left", padx=(10, 0))
+        else:
+            self.palette_btn.pack(side="left", padx=(10, 0))
+
+    @staticmethod
+    def _to_hex(color) -> str:
+        return "#%02x%02x%02x" % tuple(int(c) for c in color)
+
+    def _rgb_text(self) -> str:
+        return f"RGB({self.color[0]}, {self.color[1]}, {self.color[2]})"
+
+    def _apply_color(self, color) -> None:
+        self.color = tuple(int(c) for c in color)
+        self.swatch.configure(background=self._to_hex(self.color))
+        self.rgb_label.configure(text=self._rgb_text())
+
+    def _pick_single(self) -> None:
+        result = colorchooser.askcolor(color=self._to_hex(self.color), title="色を選択")
+        if result and result[0]:
+            self._apply_color(result[0])
+
+    def _pick_palette(self) -> None:
+        def on_ok(r, g, b, tolerance) -> None:
+            self._apply_color((r, g, b))
+            self.tolerance_var.set(str(tolerance))
+
+        ColorPalettePicker(
+            self.winfo_toplevel(), initial_color=self.color,
+            initial_tolerance=self._tolerance_int(), on_ok=on_ok,
+        )
+
+    def _tolerance_int(self) -> int:
+        try:
+            return max(0, min(255, int(self.tolerance_var.get())))
+        except ValueError:
+            return 20
+
+    def get(self) -> tuple[int, int, int, int]:
+        return (*self.color, self._tolerance_int())
 
 
 class RegionPicker(tk.Toplevel):
@@ -1128,6 +1403,8 @@ class RecorderApp(_AppBase):
         "click_offset_from_image": (("image_path", ""),),
         "click_between_images": (("image_path_a", "A: "), ("image_path_b", "B: ")),
         "scroll_until_image_found": (("image_path", ""),),
+        "wait_for_image": (("image_path", ""),),
+        "wait_for_image_disappear": (("image_path", ""),),
     }
 
     def _on_step_selected(self, event=None) -> None:
@@ -5353,6 +5630,230 @@ class RecorderApp(_AppBase):
                     })
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "画像が表示されるまで待機する":
+            ttk.Label(
+                f, text="画面上(領域を絞ればその中だけ)に指定した画像が表示されるまで"
+                "待ちます。ボタンが有効になる・読み込みが終わる等のタイミング待ちに使います。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
+            img_field = ImagePasteField(f, "表示を待ちたい画像")
+            img_field.pack(fill="x", pady=4)
+            conf_field = PlainField(f, "一致の緩さ(confidence, 0.1〜1.0)", default="0.8")
+            conf_field.pack(fill="x", pady=4)
+            timeout_field = PlainField(f, "最大何秒待つか", default="15")
+            timeout_field.pack(fill="x", pady=4)
+            region_field = RegionField(f, self.recorder.desktop, "検索範囲を画面全体ではなく特定の領域に絞る")
+            region_field.pack(fill="x", pady=2)
+
+            def on_submit():
+                image_path = img_field.get()
+                if not image_path:
+                    self.log("⚠ 画像を指定してください(貼り付け または 参照)")
+                    return
+                try:
+                    confidence = float(conf_field.get() or "0.8")
+                except ValueError:
+                    confidence = 0.8
+                try:
+                    timeout = float(timeout_field.get() or "15")
+                except ValueError:
+                    timeout = 15.0
+                try:
+                    region = region_field.get_region()
+                except ValueError:
+                    self.log("⚠ 領域は数字で入力してください")
+                    return
+
+                params = {
+                    "image_path": image_path, "confidence": confidence, "timeout": timeout, "region": region,
+                }
+                try:
+                    result = self._run_screen_search_hidden(
+                        self.recorder.desktop.wait_for_image,
+                        image_path, confidence=confidence, timeout=timeout, region=region,
+                    )
+                    self.log(f"→ 実際に表示を確認できました: {result}")
+                    retry_cfg = self._ask_retry()
+                    self.register_step({
+                        "handler": "desktop", "action": "wait_for_image",
+                        "params": params, "verify": {"type": "none"}, "verify_skip": False,
+                        "retry": retry_cfg,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+                    if self._confirm("未確認のままこの手順を登録しますか?"):
+                        self.register_step({
+                            "handler": "desktop", "action": "wait_for_image",
+                            "params": params, "verify": {"type": "none"}, "verify_skip": False,
+                        })
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "画像が消えるまで待機する":
+            ttk.Label(
+                f, text="画面上(領域を絞ればその中だけ)から指定した画像が消えるまで"
+                "待ちます。読み込み中の表示が消える等のタイミング待ちに使います。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
+            img_field = ImagePasteField(f, "消えるのを待ちたい画像")
+            img_field.pack(fill="x", pady=4)
+            conf_field = PlainField(f, "一致の緩さ(confidence, 0.1〜1.0)", default="0.8")
+            conf_field.pack(fill="x", pady=4)
+            timeout_field = PlainField(f, "最大何秒待つか", default="15")
+            timeout_field.pack(fill="x", pady=4)
+            region_field = RegionField(f, self.recorder.desktop, "検索範囲を画面全体ではなく特定の領域に絞る")
+            region_field.pack(fill="x", pady=2)
+
+            def on_submit():
+                image_path = img_field.get()
+                if not image_path:
+                    self.log("⚠ 画像を指定してください(貼り付け または 参照)")
+                    return
+                try:
+                    confidence = float(conf_field.get() or "0.8")
+                except ValueError:
+                    confidence = 0.8
+                try:
+                    timeout = float(timeout_field.get() or "15")
+                except ValueError:
+                    timeout = 15.0
+                try:
+                    region = region_field.get_region()
+                except ValueError:
+                    self.log("⚠ 領域は数字で入力してください")
+                    return
+
+                params = {
+                    "image_path": image_path, "confidence": confidence, "timeout": timeout, "region": region,
+                }
+                try:
+                    result = self._run_screen_search_hidden(
+                        self.recorder.desktop.wait_for_image_disappear,
+                        image_path, confidence=confidence, timeout=timeout, region=region,
+                    )
+                    self.log(f"→ 実際に消えたことを確認できました: {result}")
+                    retry_cfg = self._ask_retry()
+                    self.register_step({
+                        "handler": "desktop", "action": "wait_for_image_disappear",
+                        "params": params, "verify": {"type": "none"}, "verify_skip": False,
+                        "retry": retry_cfg,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+                    if self._confirm("未確認のままこの手順を登録しますか?"):
+                        self.register_step({
+                            "handler": "desktop", "action": "wait_for_image_disappear",
+                            "params": params, "verify": {"type": "none"}, "verify_skip": False,
+                        })
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "特定の色が出るまで待機する":
+            ttk.Label(
+                f, text="指定した領域内のいずれかのピクセルが、指定した色(揺らぎの範囲内)に"
+                "なるまで待ちます。ステータス表示が特定の色に変わるのを待つ場合等に使います。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
+            region_field = RegionField(f, self.recorder.desktop, "監視する領域(色の待機では指定が必須です)")
+            region_field.pack(fill="x", pady=2)
+            color_field = ColorField(f)
+            color_field.pack(fill="x", pady=4)
+            timeout_field = PlainField(f, "最大何秒待つか", default="15")
+            timeout_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                try:
+                    region = region_field.get_region()
+                except ValueError:
+                    self.log("⚠ 領域は数字で入力してください")
+                    return
+                if region is None:
+                    self.log("⚠ 色の待機では領域の指定が必須です(上のチェックを入れてください)")
+                    return
+                r, g, b, tolerance = color_field.get()
+                try:
+                    timeout = float(timeout_field.get() or "15")
+                except ValueError:
+                    timeout = 15.0
+
+                params = {
+                    "region": region, "color": [r, g, b], "tolerance": tolerance, "timeout": timeout,
+                }
+                try:
+                    result = self._run_screen_search_hidden(
+                        self.recorder.desktop.wait_for_color,
+                        region, [r, g, b], tolerance=tolerance, timeout=timeout,
+                    )
+                    self.log(f"→ 実際に検知できました: {result}")
+                    retry_cfg = self._ask_retry()
+                    self.register_step({
+                        "handler": "desktop", "action": "wait_for_color",
+                        "params": params, "verify": {"type": "none"}, "verify_skip": False,
+                        "retry": retry_cfg,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+                    if self._confirm("未確認のままこの手順を登録しますか?"):
+                        self.register_step({
+                            "handler": "desktop", "action": "wait_for_color",
+                            "params": params, "verify": {"type": "none"}, "verify_skip": False,
+                        })
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "特定の色が消えるまで待機する":
+            ttk.Label(
+                f, text="指定した領域内から、指定した色(揺らぎの範囲内)のピクセルが"
+                "1つも無くなるまで待ちます。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
+            region_field = RegionField(f, self.recorder.desktop, "監視する領域(色の待機では指定が必須です)")
+            region_field.pack(fill="x", pady=2)
+            color_field = ColorField(f)
+            color_field.pack(fill="x", pady=4)
+            timeout_field = PlainField(f, "最大何秒待つか", default="15")
+            timeout_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                try:
+                    region = region_field.get_region()
+                except ValueError:
+                    self.log("⚠ 領域は数字で入力してください")
+                    return
+                if region is None:
+                    self.log("⚠ 色の待機では領域の指定が必須です(上のチェックを入れてください)")
+                    return
+                r, g, b, tolerance = color_field.get()
+                try:
+                    timeout = float(timeout_field.get() or "15")
+                except ValueError:
+                    timeout = 15.0
+
+                params = {
+                    "region": region, "color": [r, g, b], "tolerance": tolerance, "timeout": timeout,
+                }
+                try:
+                    result = self._run_screen_search_hidden(
+                        self.recorder.desktop.wait_for_color_disappear,
+                        region, [r, g, b], tolerance=tolerance, timeout=timeout,
+                    )
+                    self.log(f"→ 実際に消えたことを確認できました: {result}")
+                    retry_cfg = self._ask_retry()
+                    self.register_step({
+                        "handler": "desktop", "action": "wait_for_color_disappear",
+                        "params": params, "verify": {"type": "none"}, "verify_skip": False,
+                        "retry": retry_cfg,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+                    if self._confirm("未確認のままこの手順を登録しますか?"):
+                        self.register_step({
+                            "handler": "desktop", "action": "wait_for_color_disappear",
+                            "params": params, "verify": {"type": "none"}, "verify_skip": False,
+                        })
 
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
