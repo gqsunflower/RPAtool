@@ -2964,6 +2964,7 @@ class MacroRecorder:
             print("  13) 開いているウィンドウのタイトル一覧を見る(目印探し用)")
             print("  14) 別のウィンドウをアクティブにする(タイトル指定。エクスプローラーの")
             print("      特定ウィンドウ切替等に)")
+            print("  15) ショートカットを作成する")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -2996,10 +2997,52 @@ class MacroRecorder:
                 self._record_desktop_list_titles()
             elif choice == "14":
                 self._record_desktop_activate_window()
+            elif choice == "15":
+                self._record_explorer_create_shortcut()
             elif choice == "0":
                 return
             else:
-                print("0〜14のいずれかを入力してください。\n")
+                print("0〜15のいずれかを入力してください。\n")
+
+    def _record_explorer_create_shortcut(self) -> None:
+        target = self._ask_sluttable_value("ショートカット先(対象のファイル or フォルダ)のパス")
+        if target is None:
+            print("  → キャンセルしました。\n")
+            return
+        target_test, target_param = target
+
+        folder = self._ask_sluttable_value("ショートカットを置くフォルダのパス")
+        if folder is None:
+            print("  → キャンセルしました。\n")
+            return
+        folder_test, folder_param = folder
+
+        name = self._ask_sluttable_value("ショートカットの名前(拡張子.lnkは不要)")
+        if name is None:
+            print("  → キャンセルしました。\n")
+            return
+        name_test, name_param = name
+
+        arguments = self._ask("  起動時の引数(不要ならそのままEnter): ").strip()
+        description = self._ask("  ショートカットの説明(不要ならそのままEnter): ").strip()
+        overwrite = self._ask(
+            "  保存先に同名のショートカットが既にある場合、上書きしますか?(通常はN) (y/N): "
+        ).lower() == "y"
+
+        params = {
+            "target": target_param, "folder": folder_param, "name": name_param,
+            "arguments": arguments, "description": description, "overwrite": overwrite,
+        }
+        try:
+            result = self.explorer.create_shortcut(
+                target_test, folder_test, name=name_test, arguments=arguments,
+                description=description, overwrite=overwrite,
+            )
+            print(f"  → 実際に作成できました: {result}")
+            self.steps.append({"handler": "explorer", "action": "create_shortcut", "params": params})
+            print("  → 登録しました。(間違えていたら次のメニューで「12」から取り消せます)\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
 
     def _record_explorer_path_exists(self) -> None:
         result = self._ask_sluttable_value("確認するパス(ファイル or フォルダ)")

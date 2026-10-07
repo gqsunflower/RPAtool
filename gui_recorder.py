@@ -175,7 +175,7 @@ DOMAIN_ACTIONS = {
         "パスを開く", "フォルダを作成する", "ファイルを移動する", "ファイルをコピーする",
         "フォルダを移動する", "フォルダをコピーする", "ファイル名を変更する", "フォルダ名を変更する",
         "パスが存在するか確認する", "フォルダ内のファイル一覧を取得する",
-        "ファイルを削除する", "フォルダを削除する",
+        "ファイルを削除する", "フォルダを削除する", "ショートカットを作成する",
         "開いているウィンドウのタイトル一覧を見る", "ウィンドウをアクティブにする",
     ],
     "process": ["exe/pyを実行する"],
@@ -4777,6 +4777,58 @@ class RecorderApp(_AppBase):
                 try:
                     result = getattr(self.recorder.explorer, action_name)(path_test, name_test, overwrite=overwrite)
                     self.log(f"→ 名前を変更できました: {result}")
+                    self.register_step(step)
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "ショートカットを作成する":
+            ttk.Label(
+                f, text="ファイル/フォルダへのショートカット(.lnk)を作ります。ショートカット先・"
+                "置くフォルダ・名前をそれぞれ指定します(名前を空にすると対象と同じ名前になります)。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
+            target_field = ValueSlotField(f, "ショートカット先(対象のファイル or フォルダ)のパス")
+            target_field.add_button("参照...", target_field.browse_file)
+            target_field.add_button("フォルダ...", target_field.browse_dir)
+            target_field.pack(fill="x", pady=4)
+            folder_field = ValueSlotField(f, "ショートカットを置くフォルダのパス")
+            folder_field.add_button("参照...", folder_field.browse_dir)
+            folder_field.pack(fill="x", pady=4)
+            name_field = ValueSlotField(f, "ショートカットの名前(.lnk不要。空なら対象と同じ名前)")
+            name_field.pack(fill="x", pady=4)
+            args_field = PlainField(f, "起動時の引数(任意)", width=40)
+            args_field.pack(fill="x", pady=2)
+            desc_field = PlainField(f, "ショートカットの説明(任意)", width=40)
+            desc_field.pack(fill="x", pady=2)
+            overwrite_field = BoolField(f, "同名のショートカットがあれば上書きする")
+            overwrite_field.pack(anchor="w", pady=2)
+
+            def on_submit():
+                target_test, target_param, _ = target_field.get()
+                folder_test, folder_param, _ = folder_field.get()
+                name_test, name_param, _ = name_field.get()
+                arguments = args_field.get().strip()
+                description = desc_field.get().strip()
+                overwrite = overwrite_field.get()
+                step = {
+                    "handler": "explorer", "action": "create_shortcut",
+                    "params": {
+                        "target": target_param, "folder": folder_param, "name": name_param,
+                        "arguments": arguments, "description": description, "overwrite": overwrite,
+                    },
+                }
+                if any(self._has_template(v) for v in (target_test, folder_test, name_test)):
+                    self.log("→ 変数参照が含まれるため動作確認をスキップして登録します")
+                    self.register_step(step)
+                    return
+                try:
+                    result = self.recorder.explorer.create_shortcut(
+                        target_test, folder_test, name=name_test, arguments=arguments,
+                        description=description, overwrite=overwrite,
+                    )
+                    self.log(f"→ ショートカットを作成できました: {result}")
                     self.register_step(step)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")

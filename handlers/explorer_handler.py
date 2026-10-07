@@ -1,6 +1,6 @@
 """
 ExplorerHandler: パスを開く・フォルダ作成・ファイル/フォルダの移動・コピー・
-名前変更を行うハンドラ。ネットワークアクセスは一切行わない。
+名前変更・ショートカット作成を行うハンドラ。ネットワークアクセスは一切行わない。
 
 安全設計:
 - 移動・コピー・名前変更の先に同名のファイル/フォルダが既に存在する場合、
@@ -167,6 +167,62 @@ class ExplorerHandler:
             shutil.rmtree(dest)
         src.rename(dest)
         logger.info("フォルダ名を変更しました: %s -> %s", src, dest)
+        return str(dest)
+
+    def create_shortcut(
+        self,
+        target: str,
+        folder: str,
+        name: str = "",
+        arguments: str = "",
+        working_dir: str = "",
+        description: str = "",
+        overwrite: bool = False,
+    ) -> str:
+        """target(ショートカット先: ファイル/フォルダ)へのショートカット(.lnk)を
+        folder(ショートカットを置くフォルダ。無ければ作成する)の中に、name
+        (ショートカットの名前)で作成する(Windows専用)。
+
+        name を省略すると「対象の名前」になる。拡張子 .lnk は付けても付けなくて
+        もよい(自動で補う)。name にパス区切り文字は使えない(置き場所は
+        folder で指定する)。同名のショートカットが既にある場合は、既定では
+        エラーで止まる(overwrite=True のときだけ上書き)。working_dir を省略
+        すると、対象がファイルならその置かれているフォルダ、フォルダなら
+        対象自身になる。
+        """
+        if platform.system() != "Windows":
+            raise RuntimeError("ショートカット(.lnk)の作成はWindowsのみ対応しています")
+        tgt = Path(target)
+        if not tgt.exists():
+            raise FileNotFoundError(f"ショートカットの対象が見つかりません: {tgt}")
+
+        link_name = (name or "").strip() or tgt.name
+        if "/" in link_name or "\\" in link_name:
+            raise ValueError(
+                f"ショートカットの名前にパス区切り文字は使えません(置く場所はフォルダ欄で指定): {link_name}"
+            )
+        if not link_name.lower().endswith(".lnk"):
+            link_name += ".lnk"
+        if not folder or not str(folder).strip():
+            raise ValueError("ショートカットを置くフォルダを指定してください")
+        dest = Path(folder) / link_name
+        self._check_conflict(dest, overwrite)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            import win32com.client  # type: ignore[import-not-found]
+        except ImportError as e:
+            raise RuntimeError(
+                "ショートカットの作成には pywin32 が必要です(pip install pywin32)"
+            ) from e
+        shell = win32com.client.Dispatch("WScript.Shell")
+        link = shell.CreateShortcut(str(dest))
+        link.TargetPath = str(tgt.resolve())
+        link.Arguments = arguments
+        link.WorkingDirectory = working_dir or str(tgt.resolve() if tgt.is_dir() else tgt.resolve().parent)
+        link.Description = description
+        link.Save()
+        logger.info("ショートカットを作成しました: %s -> %s", dest, tgt)
         return str(dest)
 
     def path_exists(self, path: str) -> bool:
