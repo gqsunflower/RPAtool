@@ -79,10 +79,13 @@ def check_control_flow_integrity(steps: list[dict]) -> list[str]:
     ケースまでは検出できないため、あくまで簡易チェック)。
     """
     warnings: list[str] = []
-    labels = {
+    label_names = [
         s["params"]["name"] for s in steps
         if s.get("handler") == "control" and s.get("action") == "label"
-    }
+    ]
+    labels = set(label_names)
+    for name in sorted({n for n in label_names if label_names.count(n) > 1}):
+        warnings.append(f"ラベル '{name}' が重複しています(実行時にエラーになります。名前を変えてください)")
     for s in steps:
         if s.get("handler") != "control":
             continue
@@ -133,6 +136,8 @@ class MacroRecorder:
         self.variables: dict[str, Any] = {}
         self.steps: list[dict] = []
         self.required_slots: list[str] = []
+        # 既存マクロを再編集する際にユーザーが入力した、スロット({{名前}})の動作確認用の値
+        self.slot_values: dict = {}
         self._site_opened = False
         self._auto_var_counter = 0
         # 既存マクロを読み込んで編集している場合、そのマクロ名(load_existing参照)。
@@ -197,7 +202,7 @@ class MacroRecorder:
 
         if "{{" in value and "}}" in value:
             try:
-                resolved = _substitute(value, self.variables)
+                resolved = _substitute(value, {**self.slot_values, **self.variables})
             except (KeyError, ValueError, IndexError) as e:
                 test_value = self._ask(
                     f"  '{value}' の中の変数を、記録済みの値からは自動的に解決できませんでした"
@@ -4932,7 +4937,10 @@ class MacroRecorder:
                 if s.get("action") == "load_workbook":
                     path = params.get("path", "")
                     if "{{" in str(path):
-                        continue
+                        try:
+                            path = _substitute(path, {**self.slot_values, **self.variables})
+                        except (KeyError, ValueError, IndexError):
+                            continue  # 値が未入力のスロット等は解決できないためスキップ
                     self.excel.load_workbook(path, alias=params.get("alias"))
                 elif s.get("action") == "create_workbook":
                     self.excel.create_workbook(alias=params.get("alias"))
@@ -4945,12 +4953,24 @@ class MacroRecorder:
 
         return warnings
 
-    def load_existing(self, macro_name: str) -> dict:
+    def peek_required_slots(self, macro_name: str) -> list[str]:
+        """保存済みマクロが必要とするスロット名の一覧だけを先に取得する
+        (読み込み前に、動作確認用の値をユーザーに尋ねるため)。"""
+        data = json.loads((self.config_dir / "macros.json").read_text(encoding="utf-8"))
+        macro = data.get("macros", {}).get(macro_name)
+        if macro is None:
+            raise KeyError(f"マクロが見つかりません: {macro_name}")
+        return list(macro.get("required_slots", []))
+
+    def load_existing(self, macro_name: str, slot_values: dict | None = None) -> dict:
         """保存済みのマクロを読み込み、以降の編集(手順の追加・並び替え等)の
         土台にする。ブラウザ/Excelの状態は、既存手順の最後の状態を
         ベストエフォートで再現する(replay_state参照)。
+        slot_values を渡すと、{{スロット名}}を含むパス等もその値で解決して
+        状態を再現でき、以降の動作確認でも同じ値が使われる。
         戻り値: 読み込んだマクロの定義(description等の参照用)。
         """
+        self.slot_values = dict(slot_values or {})
         path = self.config_dir / "macros.json"
         data = json.loads(path.read_text(encoding="utf-8"))
         macros = data.get("macros", {})

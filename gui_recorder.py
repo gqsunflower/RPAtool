@@ -1331,9 +1331,13 @@ class RecorderApp(_AppBase):
         steps_frame.pack(fill="both", expand=True, pady=4)
         steps_row = ttk.Frame(steps_frame)
         steps_row.pack(fill="both", expand=True)
-        self.steps_listbox = tk.Listbox(steps_row, exportselection=False)
+        # extended: Shift+クリックで範囲選択、Ctrl+クリックで飛び飛びの複数選択
+        self.steps_listbox = tk.Listbox(steps_row, exportselection=False, selectmode="extended")
         self.steps_listbox.pack(side="left", fill="both", expand=True)
         self.steps_listbox.bind("<<ListboxSelect>>", self._on_step_selected)
+        self.steps_listbox.bind("<Control-c>", lambda e: (self._copy_selected_steps(), "break")[1])
+        self.steps_listbox.bind("<Control-v>", lambda e: (self._paste_steps(), "break")[1])
+        self._step_clipboard: list[dict] = []
         steps_move_col = ttk.Frame(steps_row)
         steps_move_col.pack(side="left", fill="y", padx=(4, 0))
         ttk.Button(steps_move_col, text="↑", width=3, command=self._move_step_up).pack(pady=(0, 2))
@@ -1343,6 +1347,12 @@ class RecorderApp(_AppBase):
         ).pack(pady=(10, 2))
         ttk.Button(
             steps_move_col, text="編集", width=6, command=self._edit_selected_step_params,
+        ).pack()
+        ttk.Button(
+            steps_move_col, text="コピー", width=6, command=self._copy_selected_steps,
+        ).pack(pady=(10, 2))
+        ttk.Button(
+            steps_move_col, text="貼り付け", width=6, command=self._paste_steps,
         ).pack()
 
         self.insert_before_var = tk.BooleanVar(value=False)
@@ -1465,18 +1475,84 @@ class RecorderApp(_AppBase):
             self.log(f"⚠ 制御構文の整合性チェック: {w}")
 
     def _move_step_up(self) -> None:
-        sel = self.steps_listbox.curselection()
-        if not sel or sel[0] == 0:
-            return
-        idx = sel[0]
-        self._swap_steps(idx - 1, idx, select=idx - 1)
+        self._move_selected_steps(-1)
 
     def _move_step_down(self) -> None:
-        sel = self.steps_listbox.curselection()
-        if not sel or sel[0] >= len(self.recorder.steps) - 1:
+        self._move_selected_steps(1)
+
+    def _move_selected_steps(self, delta: int) -> None:
+        """選択中の手順(複数可)を、相対順序を保ったまま1つ上/下へ動かす。
+        端に達している手順は動かさず、その手前で止まる。"""
+        steps = self.recorder.steps
+        sel = list(self.steps_listbox.curselection())
+        if not sel:
             return
-        idx = sel[0]
-        self._swap_steps(idx, idx + 1, select=idx + 1)
+        order = sel if delta < 0 else list(reversed(sel))
+        selected = set(sel)
+        new_selected: set[int] = set()
+        moved = False
+        for idx in order:
+            target = idx + delta
+            if 0 <= target < len(steps) and target not in selected:
+                steps[idx], steps[target] = steps[target], steps[idx]
+                selected.discard(idx)
+                selected.add(target)
+                new_selected.add(target)
+                moved = True
+            else:
+                new_selected.add(idx)
+        if not moved:
+            return
+        self._last_registered_index = None
+        self.refresh_steps()
+        for i in sorted(new_selected):
+            self.steps_listbox.selection_set(i)
+        self.steps_listbox.see(min(new_selected) if delta < 0 else max(new_selected))
+        self._on_step_selected()
+        for w in check_control_flow_integrity(steps):
+            self.log(f"⚠ 制御構文の整合性チェック: {w}")
+
+    def _copy_selected_steps(self) -> None:
+        """選択中の手順(複数可)を、一覧の並び順のままコピーする。"""
+        import copy
+        sel = list(self.steps_listbox.curselection())
+        if not sel:
+            self.log("→ コピーする手順を、一覧から選んでください(Shift/Ctrl+クリックで複数選択)。")
+            return
+        self._step_clipboard = [copy.deepcopy(self.recorder.steps[i]) for i in sel]
+        self.log(f"→ {len(sel)}件の手順をコピーしました(貼り付けで複製できます)。")
+
+    def _paste_steps(self) -> None:
+        """コピーした手順を、選択中の手順の直後(「直前に挿入」ONなら直前)に
+        複製して挿入する。何も選択していなければ末尾に追加する。貼り付けた
+        手順がそのまま選択状態になるので、続けて貼り付ければ繰り返し増やせる。"""
+        import copy
+        if not self._step_clipboard:
+            self.log("→ 貼り付ける手順がありません。先に手順を選んでコピーしてください。")
+            return
+        sel = list(self.steps_listbox.curselection())
+        if sel:
+            idx = sel[0] if self.insert_before_var.get() else sel[-1] + 1
+        else:
+            idx = len(self.recorder.steps)
+        pasted = [copy.deepcopy(s) for s in self._step_clipboard]
+        self.recorder.steps[idx:idx] = pasted
+        self._last_registered_index = None
+        self.refresh_steps()
+        self.steps_listbox.selection_clear(0, "end")
+        for i in range(idx, idx + len(pasted)):
+            self.steps_listbox.selection_set(i)
+        self.steps_listbox.see(idx)
+        self._on_step_selected()
+        self.log(f"✅ {len(pasted)}件の手順を手順{idx + 1}から貼り付けました。")
+        for s in pasted:
+            if s.get("handler") == "control" and s.get("action") == "label":
+                self.log("⚠ ラベル(目印)を複製しています。同じ名前のラベルは重複エラーになるため、名前を編集してください。")
+                break
+        if any(s.get("store_as") for s in pasted):
+            self.log("ℹ 変数への保存(store_as)も複製されています。同じ変数名に上書きされるため、必要なら編集してください。")
+        for w in check_control_flow_integrity(self.recorder.steps):
+            self.log(f"⚠ 制御構文の整合性チェック: {w}")
 
     def register_step(self, step: dict, value: Any = _NO_VALUE) -> None:
         """手順を登録する。value を渡すと(store_asが設定されている場合)、
@@ -1490,7 +1566,7 @@ class RecorderApp(_AppBase):
         """
         insert_before = self.insert_before_var.get()
         sel = self.steps_listbox.curselection()
-        idx = (sel[0] if insert_before else sel[0] + 1) if sel else len(self.recorder.steps)
+        idx = (sel[0] if insert_before else sel[-1] + 1) if sel else len(self.recorder.steps)
         self.recorder.steps.insert(idx, step)
         self._last_registered_index = idx
 
@@ -1644,8 +1720,21 @@ class RecorderApp(_AppBase):
         except Exception:  # noqa: BLE001
             pass
 
+        # {{スロット名}}で登録したパラメータは、実際の値が無いと状態の再現
+        # (Excelのブックを開く等)ができないため、読み込み前に値を尋ねる
+        # (キャンセル/未入力の場合は、そのスロットを含む手順の再現だけスキップ)。
+        slot_values: dict = {}
         try:
-            macro = self.recorder.load_existing(macro_name)
+            slot_names = self.recorder.peek_required_slots(macro_name)
+        except Exception:  # noqa: BLE001
+            slot_names = []
+        if slot_names:
+            asked = self._ask_slot_values(slot_names, initial=self.recorder.slot_values)
+            if asked is not None:
+                slot_values = {k: v for k, v in asked.items() if v != ""}
+
+        try:
+            macro = self.recorder.load_existing(macro_name, slot_values=slot_values)
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("読み込みエラー", f"マクロの読み込みに失敗しました: {e}")
             return
@@ -1716,13 +1805,15 @@ class RecorderApp(_AppBase):
 
         ttk.Button(win, text="実行開始", command=do_start).pack(pady=10)
 
-    def _ask_slot_values(self, slot_names: list[str]) -> dict | None:
+    def _ask_slot_values(self, slot_names: list[str], initial: dict | None = None) -> dict | None:
         """required_slotsの値を1つのダイアログでまとめて尋ねる。
         キャンセルされた場合はNoneを返す。JSON形式で書けばdict/listも渡せる
-        (CLI版のprompt_for_slotと同じ考え方)。
+        (CLI版のprompt_for_slotと同じ考え方)。initialに前回入力した値を
+        渡すと、入力欄の初期値として表示する。
         """
         if not slot_names:
             return {}
+        initial = initial or {}
         win = tk.Toplevel(self)
         win.title("スロットの値を入力")
         win.grab_set()
@@ -1733,7 +1824,8 @@ class RecorderApp(_AppBase):
         entries: dict[str, tk.StringVar] = {}
         for name in slot_names:
             ttk.Label(win, text=name).pack(anchor="w", padx=10)
-            var = tk.StringVar()
+            prev = initial.get(name, "")
+            var = tk.StringVar(value=prev if isinstance(prev, str) else json.dumps(prev, ensure_ascii=False))
             ttk.Entry(win, textvariable=var, width=40).pack(padx=10, pady=(0, 4))
             entries[name] = var
 
@@ -1759,7 +1851,9 @@ class RecorderApp(_AppBase):
 
     def _run_test_execution(self, start_step: int, end_step: int | None) -> None:
         slot_names = list(self.recorder.required_slots)
-        slots = self._ask_slot_values(slot_names)
+        slots = self._ask_slot_values(slot_names, initial=self.recorder.slot_values)
+        if slots is not None:
+            self.recorder.slot_values.update(slots)
         if slots is None:
             self.log("→ テスト実行をキャンセルしました。")
             return
@@ -6397,30 +6491,46 @@ class RecorderApp(_AppBase):
         if not sel:
             self.log("→ 削除する手順を、一覧から選んでください。")
             return
-        idx = sel[0]
-        step = self.recorder.steps[idx]
-        if not self._confirm(
-            f"手順{idx + 1}({step['handler']}.{step['action']})を削除します。よろしいですか?"
-        ):
+        indices = list(sel)
+        idx = indices[0]
+        if len(indices) == 1:
+            step = self.recorder.steps[idx]
+            message = f"手順{idx + 1}({step['handler']}.{step['action']})を削除します。よろしいですか?"
+        else:
+            message = f"選択した{len(indices)}件の手順を削除します。よろしいですか?"
+        if not self._confirm(message):
             return
-        removed = self.recorder.steps.pop(idx)
+        removed_steps = []
+        for i in reversed(indices):  # 後ろから消せば前の番号がずれない
+            removed_steps.append(self.recorder.steps.pop(i))
+        removed_steps.reverse()
         self._last_registered_index = None
-        self._cleanup_after_step_removed(removed)
+        for removed in removed_steps:
+            self._cleanup_after_step_removed(removed)
         self.refresh_steps()
         # 削除で一覧がリセットされ、毎回先頭までスクロールし直す羽目になるのを
-        # 防ぐため、削除した位置と同じ位置(繰り上がった次の手順)を選択し直して
+        # 防ぐため、削除した先頭と同じ位置(繰り上がった次の手順)を選択し直して
         # その場所が見える状態を保つ。
         if self.recorder.steps:
             next_idx = min(idx, len(self.recorder.steps) - 1)
             self.steps_listbox.selection_set(next_idx)
             self.steps_listbox.see(next_idx)
             self._on_step_selected()
-        self.log(f"→ 手順{idx + 1}を削除しました: {removed['handler']}.{removed['action']}")
+        if len(removed_steps) == 1:
+            removed = removed_steps[0]
+            self.log(f"→ 手順{idx + 1}を削除しました: {removed['handler']}.{removed['action']}")
+        else:
+            self.log(f"→ {len(removed_steps)}件の手順を削除しました。")
+        for w in check_control_flow_integrity(self.recorder.steps):
+            self.log(f"⚠ 制御構文の整合性チェック: {w}")
 
     def _edit_selected_step_params(self) -> None:
         sel = self.steps_listbox.curselection()
         if not sel:
             self.log("→ 編集する手順を、一覧から選んでください。")
+            return
+        if len(sel) > 1:
+            self.log("→ 編集は1件ずつ行えます。手順を1つだけ選んでください。")
             return
         idx = sel[0]
         step = self.recorder.steps[idx]
