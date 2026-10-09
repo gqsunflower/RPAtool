@@ -648,6 +648,41 @@ class DesktopHandler:
             for w in words
         ]
 
+    def read_text_ocr(
+        self, region: tuple[int, int, int, int] | list[int],
+        language: str = "jpn+eng", psm: str = _OCR_DEFAULT_PSM,
+        remove_spaces: bool = False,
+    ) -> str:
+        """指定した矩形領域(left, top, width, height)を実際にOCRで読み取り、
+        認識できた文字列を返す(行ごとに改行でつなぐ)。store_asで変数
+        (パラメータ)に保存し、後の手順で {{名前}} として使う想定。
+
+        日本語OCRは文字の間に余計な空白を入れて認識しがちなので、
+        remove_spaces=True にすると空白(改行以外)をすべて取り除く
+        (数字・日本語の値向け。英単語を読むときは False のままにする)。
+        何も認識できなかった場合は、空文字を黙って返すと後続の手順が
+        意図しない値のまま進んでしまうため、エラーにする。
+        """
+        norm_region = self._normalize_region(region)
+        if norm_region is None:
+            raise ValueError("OCRで読み取る領域(region)の指定が必須です")
+        gui = self._gui()
+        words = _ocr_word_boxes(gui.screenshot(region=norm_region), language, psm)
+        lines = []
+        for _key, group in groupby(words, key=lambda w: (w["block"], w["par"], w["line"])):
+            joined = " ".join(w["text"] for w in group)
+            lines.append(joined)
+        text = "\n".join(lines).strip()
+        if remove_spaces:
+            text = "".join(ch for ch in text if ch == "\n" or not ch.isspace())
+        if not text:
+            raise ImageNotFoundError(
+                f"領域{norm_region}からOCRで文字を認識できませんでした"
+                f"(領域・言語・読み取り方式(PSM)を見直してください)"
+            )
+        logger.info("OCRで読み取りました(region=%s): %r", norm_region, text[:80])
+        return text
+
     def _locate_text_ocr(
         self, text: str, region: tuple[int, int, int, int] | list[int] | None,
         language: str, timeout: float, psm: str = _OCR_DEFAULT_PSM,

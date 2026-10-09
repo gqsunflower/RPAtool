@@ -48,6 +48,12 @@ end_step を指定すると、そのステップの直前で自動的に実行�
 (end_step自体は実行されません)。on_step の "run"(以降自動実行)を選んだ
 後でも、end_stepの境界だけは必ず守られます(F8の「特定行まで実行」相当)。
 
+組み込み変数 {{clipboard}}:
+  どの手順の params でも "{{clipboard}}" と書くと、その手順を実行した時点の
+  OSクリップボードの文字列に置き換わる(textハンドラとpyperclipが必要)。
+  例: Excelのセル書き込みの値を "{{clipboard}}" にすると「貼り付け」になる。
+  スロットやstore_asで "clipboard" という名前を定義した場合はそちらが優先。
+
 前の手順の結果を後の手順で使う(store_as / 変数):
   ステップに {"store_as": "変数名"} を付けておくと、その手順の実行結果が
   変数として記録される。以降のどの手順の params の中でも "{{変数名}}" と
@@ -309,6 +315,31 @@ def _substitute(value: Any, slots: dict) -> Any:
     return value
 
 
+_CLIPBOARD_REF = re.compile(r"\{\{\s*clipboard\s*\}\}")
+
+
+def _references_clipboard(value: Any) -> bool:
+    """paramsの中(dictのキー/値、リストの中身も含む)に {{clipboard}} があるか。"""
+    if isinstance(value, str):
+        return bool(_CLIPBOARD_REF.search(value))
+    if isinstance(value, dict):
+        return any(_references_clipboard(k) or _references_clipboard(v) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_references_clipboard(v) for v in value)
+    return False
+
+
+def builtin_variables(value: Any, text_handler: Any) -> dict:
+    """組み込みの変数を、実際に参照されている場合だけ解決して返す。
+    {{clipboard}} は「その手順を実行した時点のクリップボードの文字列」
+    (textハンドラのget_from_clipboard)。スロット/store_asで同名の変数を
+    定義した場合はそちらが優先される(呼び出し側で後からマージする)。
+    """
+    if text_handler is not None and _references_clipboard(value):
+        return {"clipboard": text_handler.get_from_clipboard()}
+    return {}
+
+
 def _evaluate_condition(left: Any, op: str, right: Any) -> bool:
     """if_goto用の条件式を評価する。両辺とも数値として解釈できれば数値比較、
     できなければ文字列として比較する。
@@ -499,7 +530,9 @@ class MacroExecutor:
                     i += 1
                     continue
 
-                combined = {**slots, **variables}
+                combined = {
+                    **builtin_variables(raw_params, self.handlers.get("text")), **slots, **variables,
+                }
 
                 if action_name == "label":
                     i += 1
@@ -606,7 +639,8 @@ class MacroExecutor:
             # ユーザー指定のスロットと、前の手順が store_as で記録した変数を
             # 同じ名前空間として扱う({{name}}の書き方はどちらも共通)
             try:
-                params = _substitute(raw_params, {**slots, **variables})
+                builtins = {} if dry_run else builtin_variables(raw_params, self.handlers.get("text"))
+                params = _substitute(raw_params, {**builtins, **slots, **variables})
             except (KeyError, ValueError, IndexError) as e:
                 if dry_run:
                     # dry_run中は制御構文(for/if等)が実行されず変数が

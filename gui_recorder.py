@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import signal
 import sys
 import time
@@ -190,6 +191,7 @@ DOMAIN_ACTIONS = {
         "画像が見つかるまでスクロールして探す", "待機する", "OCRで文字を探してクリックする",
         "画像が表示されるまで待機する", "画像が消えるまで待機する",
         "特定の色が出るまで待機する", "特定の色が消えるまで待機する",
+        "指定領域をOCRで読み取ってパラメータに登録する",
     ],
     "text": [
         "文字を探して切り出す", "文字を置換する", "日付・時刻を取得する",
@@ -360,7 +362,8 @@ class ValueSlotField(ttk.Frame):
             return value, "{{" + slot + "}}", slot
         if "{{" in value and "}}" in value:
             app = self.winfo_toplevel()
-            variables = getattr(getattr(app, "recorder", None), "variables", {}) or {}
+            recorder = getattr(app, "recorder", None)
+            variables = recorder.resolution_context(value) if recorder is not None else {}
             try:
                 resolved = _substitute(value, variables)
             except (KeyError, ValueError, IndexError) as e:
@@ -1112,15 +1115,74 @@ class PairsField(ttk.Frame):
         self.add_row()
 
     def add_row(self) -> None:
-        row_idx = len(self.rows)
         k_var, v_var = tk.StringVar(), tk.StringVar()
         row = ttk.Frame(self.rows_frame)
         row.pack(fill="x", pady=1)
         ttk.Label(row, text=self.key_label, width=14).pack(side="left")
         ttk.Entry(row, textvariable=k_var, width=10).pack(side="left", padx=3)
         ttk.Label(row, text=self.value_label, width=10).pack(side="left")
-        ttk.Entry(row, textvariable=v_var, width=24).pack(side="left", padx=3)
+        value_entry = ttk.Entry(row, textvariable=v_var, width=20)
+        value_entry.pack(side="left", padx=3)
+        cursor = {"pos": None}
+        value_entry.bind("<FocusOut>", lambda _e: cursor.update(pos=value_entry.index("insert")))
+        helper_btn = ttk.Button(row, text="入力補助▼", width=10)
+        helper_btn.configure(
+            command=lambda: self._show_helper_menu(helper_btn, value_entry, cursor)
+        )
+        helper_btn.pack(side="left")
         self.rows.append((k_var, v_var))
+
+    def _recorder(self):
+        return getattr(self.winfo_toplevel(), "recorder", None)
+
+    def _log(self, message: str) -> None:
+        log = getattr(self.winfo_toplevel(), "log", None)
+        if callable(log):
+            log(message)
+
+    @staticmethod
+    def _insert_text(entry, cursor: dict, text: str) -> None:
+        pos = cursor.get("pos")
+        entry.insert("end" if pos is None else pos, text)
+
+    def _show_helper_menu(self, button, entry, cursor: dict) -> None:
+        """値の入力補助メニュー: クリップボードの貼り付け(実行時/今の内容)と、
+        登録済みのパラメータ({{名前}})の挿入。"""
+        rec = self._recorder()
+        menu = tk.Menu(self, tearoff=False)
+        menu.add_command(
+            label="実行時にクリップボードから貼り付ける ({{clipboard}})",
+            command=lambda: self._insert_text(entry, cursor, "{{clipboard}}"),
+        )
+
+        def paste_now() -> None:
+            try:
+                text = rec.text.get_from_clipboard() if rec is not None else ""
+            except Exception as e:  # noqa: BLE001
+                self._log(f"⚠ {e}")
+                return
+            self._insert_text(entry, cursor, text)
+
+        menu.add_command(label="今のクリップボードの文字を入力欄へ貼り付ける(固定値)", command=paste_now)
+        menu.add_separator()
+
+        names: list[tuple[str, str]] = []
+        if rec is not None:
+            for slot in rec.required_slots:
+                names.append((slot, "スロット"))
+            for name, value in rec.variables.items():
+                if name not in rec.required_slots:
+                    preview = repr(value)
+                    names.append((name, preview if len(preview) <= 30 else preview[:30] + "..."))
+        if names:
+            for name, note in names:
+                menu.add_command(
+                    label=f"{{{{{name}}}}}  ({note})",
+                    command=lambda n=name: self._insert_text(entry, cursor, "{{" + n + "}}"),
+                )
+        else:
+            menu.add_command(label="(登録済みのパラメータはありません)", state="disabled")
+        menu.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
 
     def get(self) -> dict[str, str]:
         result = {}
@@ -2146,6 +2208,24 @@ class RecorderApp(_AppBase):
         name = (name or "").strip()
         return name or None
 
+    def _resolve_test_value(self, value):
+        """動作確認用に、値の中の {{名前}} を実際の値へ解決する(組み込みの
+        {{clipboard}}、再編集時に入力したスロット値、store_asの変数)。
+        解決できない場合は動作確認用の値をダイアログで尋ね、キャンセル
+        された場合はNoneを返す。{{}}を含まない値はそのまま返す。
+        """
+        if not isinstance(value, str) or not self._has_template(value):
+            return value
+        try:
+            return _substitute(value, self.recorder.resolution_context(value))
+        except (KeyError, ValueError, IndexError) as e:
+            return simpledialog.askstring(
+                "動作確認用の値",
+                f"'{value}' の中のパラメータを、記録済みの値からは自動的に解決できません"
+                f"でした({e})。\n動作確認用に、実際の値に置き換えたものを入力してください:",
+                parent=self,
+            )
+
     @staticmethod
     def _has_template(value: str) -> bool:
         """値の中に {{変数名}} が含まれているか(前の手順の結果を埋め込む
@@ -2346,7 +2426,16 @@ class RecorderApp(_AppBase):
                     cell_values_param = raw_pairs
 
                 try:
-                    self.recorder.excel.write_cells(sheet_test, cell_values_test)
+                    # {{パラメータ}} / {{clipboard}} は、動作確認では実際の値に解決して
+                    # 書き込む(登録するのはテンプレートのまま)
+                    resolved_test: dict = {}
+                    for cell_ref, v in cell_values_test.items():
+                        resolved = self._resolve_test_value(v)
+                        if resolved is None:
+                            self.log("→ 動作確認用の値が入力されなかったため、登録を中止しました")
+                            return
+                        resolved_test[cell_ref] = resolved
+                    self.recorder.excel.write_cells(sheet_test, resolved_test)
                     self.log("→ セルへの書き込みを確認できました")
                     if prereq_step:
                         self.register_step(prereq_step, prereq_value)
@@ -6000,6 +6089,68 @@ class RecorderApp(_AppBase):
                             "handler": "desktop", "action": "wait_for_color_disappear",
                             "params": params, "verify": {"type": "none"}, "verify_skip": False,
                         })
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "指定領域をOCRで読み取ってパラメータに登録する":
+            ttk.Label(
+                f, text="画面の指定領域をOCRで読み取り、その文字をパラメータ({{名前}})として"
+                "登録します。以降の手順の入力欄に {{名前}} と書けば、実行時に読み取った文字が"
+                "入ります(Excelのセル書き込み・文字入力・ファイル名の一部等)。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
+            region_field = RegionField(f, self.recorder.desktop, "読み取る領域(指定が必須です)")
+            region_field.pack(fill="x", pady=2)
+            lang_field = PlainField(f, "OCRの言語", default="jpn+eng")
+            lang_field.pack(fill="x", pady=4)
+            psm_field = PsmField(f)
+            psm_field.pack(fill="x", pady=4)
+            spaces_field = BoolField(
+                f, "読み取った文字から空白を取り除く(日本語・数字向け。英単語なら外す)",
+            )
+            spaces_field.pack(anchor="w", pady=2)
+            name_field = PlainField(f, "パラメータ名(後の手順で {{名前}} として使う)", width=20)
+            name_field.pack(fill="x", pady=4)
+
+            def on_submit():
+                try:
+                    region = region_field.get_region()
+                except ValueError:
+                    self.log("⚠ 領域は数字で入力してください")
+                    return
+                if region is None:
+                    self.log("⚠ 読み取る領域の指定が必須です(上のチェックを入れてください)")
+                    return
+                param_name = name_field.get().strip()
+                if not param_name or not re.fullmatch(r"\w+", param_name):
+                    self.log("⚠ パラメータ名は、文字・数字・アンダースコアだけで入力してください")
+                    return
+                language = lang_field.get().strip() or "jpn+eng"
+                psm = psm_field.get()
+                remove_spaces = spaces_field.get()
+
+                step = {
+                    "handler": "desktop", "action": "read_text_ocr",
+                    "params": {
+                        "region": region, "language": language, "psm": psm,
+                        "remove_spaces": remove_spaces,
+                    },
+                    "store_as": param_name,
+                }
+                try:
+                    text = self._run_screen_search_hidden(
+                        self.recorder.desktop.read_text_ocr,
+                        region, language=language, psm=psm, remove_spaces=remove_spaces,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+                    if self._confirm("未確認のままこの手順を登録しますか?"):
+                        self.register_step(step)
+                    return
+                self.log(f"→ 読み取れた文字: {text!r}")
+                self.log(f"   以降の手順で {{{{{param_name}}}}} として使えます")
+                step["retry"] = self._ask_retry()
+                self.register_step(step, text)
 
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 

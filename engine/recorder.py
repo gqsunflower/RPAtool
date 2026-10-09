@@ -32,6 +32,7 @@ Excel・PDF・Webサイト・エクスプローラー・実行ファイルの操
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -39,7 +40,7 @@ from typing import Any
 from openpyxl.utils import column_index_from_string, get_column_letter
 
 from engine.backup import backup_file
-from engine.executor import _substitute
+from engine.executor import _substitute, builtin_variables
 from handlers.browser_handler import (
     BrowserHandler,
     ElementNotFoundError,
@@ -173,6 +174,16 @@ class MacroRecorder:
             raise _ActionCancelled()
         return val
 
+    def resolution_context(self, value=None) -> dict:
+        """記録中に {{名前}} を実際の値へ解決するための辞書(動作確認用)。
+        組み込みの {{clipboard}}(今のクリップボード。valueで参照されている
+        場合のみ取得)、再編集時に入力したスロット値、store_asの変数の順に
+        マージする(後のものが優先)。
+        """
+        return {
+            **builtin_variables(value, self.text), **self.slot_values, **self.variables,
+        }
+
     def _ask_sluttable_value(self, label: str) -> tuple[str, str] | None:
         """ファイルパスやシート名など、Excel/PDFの値を1つ聞く。
         「キャンセル」が入力されたら None を返す。
@@ -202,7 +213,7 @@ class MacroRecorder:
 
         if "{{" in value and "}}" in value:
             try:
-                resolved = _substitute(value, {**self.slot_values, **self.variables})
+                resolved = _substitute(value, self.resolution_context(value))
             except (KeyError, ValueError, IndexError) as e:
                 test_value = self._ask(
                     f"  '{value}' の中の変数を、記録済みの値からは自動的に解決できませんでした"
@@ -741,6 +752,8 @@ class MacroRecorder:
                   f"動作確認では{col_test_base}列に書き込みます。\n")
 
         print("  書き込むセルと値を入力します(空Enterで入力終了)")
+        print("  ※ 値には {{clipboard}}(実行時のクリップボードを貼り付け)や、")
+        print("    登録済みのパラメータ {{名前}} も書けます。")
         cell_values_test: dict[str, str] = {}
         cell_values_param: dict[str, str] = {}
         while True:
@@ -3403,6 +3416,7 @@ class MacroRecorder:
             print("  19) 画像が消えるまで待機する")
             print("  20) 特定の色が出るまで待機する(領域内のいずれかのピクセルが対象)")
             print("  21) 特定の色が消えるまで待機する")
+            print("  22) 指定領域をOCRで読み取ってパラメータ({{名前}})に登録する")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -3449,10 +3463,12 @@ class MacroRecorder:
                 self._record_desktop_wait_for_color()
             elif choice == "21":
                 self._record_desktop_wait_for_color_disappear()
+            elif choice == "22":
+                self._record_desktop_read_text_ocr()
             elif choice == "0":
                 return
             else:
-                print("0〜21のいずれかを入力してください。\n")
+                print("0〜22のいずれかを入力してください。\n")
 
     def _record_desktop_set_zoom(self) -> None:
         print("  ※ 今アクティブなウィンドウ(通常はブラウザ)が対象です。事前に")
@@ -4275,6 +4291,38 @@ class MacroRecorder:
                 print("  → 未確認のまま登録しました。\n")
             else:
                 print("  → 登録しませんでした。メニューに戻ります。\n")
+
+    def _record_desktop_read_text_ocr(self) -> None:
+        print("  ※ 画面の指定領域をOCRで読み取り、その文字をパラメータとして登録します。")
+        print("     以降の手順の値の欄に {{名前}} と書けば、実行時に読み取った文字が入ります。")
+        region = self._ask_required_region()
+        language = self._ask("  OCRの言語(空Enterで jpn+eng): ").strip() or "jpn+eng"
+        psm = self._ask_ocr_psm()
+        remove_spaces = self._ask(
+            "  読み取った文字から空白を取り除きますか?(日本語・数字向け。英単語ならN) (y/N): "
+        ).lower() == "y"
+        while True:
+            param_name = self._ask("  パラメータ名(例: order_no。後で {{order_no}} として使えます): ").strip()
+            if param_name and re.fullmatch(r"\w+", param_name):
+                break
+            print("  文字・数字・アンダースコアだけで入力してください。\n")
+
+        params = {"region": region, "language": language, "psm": psm, "remove_spaces": remove_spaces}
+        try:
+            text = self.desktop.read_text_ocr(
+                region, language=language, psm=psm, remove_spaces=remove_spaces,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+            return
+        print(f"  → 読み取れた文字: {text!r}")
+        retry_cfg = self._ask_retry()
+        self.record_variable(param_name, text)
+        self.steps.append({
+            "handler": "desktop", "action": "read_text_ocr",
+            "params": params, "store_as": param_name, "retry": retry_cfg,
+        })
+        print(f"  → 登録しました。以降の手順で {{{{{param_name}}}}} として使えます。\n")
 
     def _record_desktop_type(self) -> None:
         result = self._ask_sluttable_value("入力する文字列")
