@@ -231,7 +231,97 @@ class BrowserHandler:
 
     # ---------- 内部ヘルパー ----------
 
+    def _browser_process_alive(self) -> bool | None:
+        """ドライバ(chromedriver/msedgedriver)配下のブラウザ本体のプロセスが
+        まだ生きているかを返す。ユーザーが手動でブラウザを閉じた場合、
+        webdriver経由の確認は失敗が分かるまで10秒ほどかかるため、先に
+        プロセスの有無で即座に判定する。psutilが無い等で判定できなければNone
+        (その場合は従来どおりwebdriver経由で確認する)。
+        """
+        try:
+            import psutil
+        except ImportError:
+            return None
+        def exited(proc) -> bool:
+            # ドライバがハンドルを握ったままだと、終了済みでもis_running()が
+            # Trueのままになるため、終了コードの有無(wait(0))で判定する。
+            try:
+                proc.wait(timeout=0)
+                return True
+            except psutil.TimeoutExpired:
+                return False
+            except psutil.NoSuchProcess:
+                return True
+
+        try:
+            driver_proc = psutil.Process(self._driver.service.process.pid)
+            if exited(driver_proc):
+                return False
+            return any(not exited(c) for c in driver_proc.children(recursive=False))
+        except psutil.NoSuchProcess:
+            return False
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _shutdown_driver(self, browser_gone: bool) -> None:
+        """ドライバを終了させる。ブラウザが既に無い場合、quit()は応答待ちで
+        10秒ほど固まるため、ドライバのプロセスを直接終了させて待たない。"""
+        if browser_gone:
+            try:
+                self._driver.service.process.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        try:
+            self._driver.quit()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _discard_dead_driver(self) -> None:
+        """ユーザーがブラウザを手動で閉じる等してセッションが失われていた場合に、
+        古いドライバ/タブの記録を捨てて、次の_get_driver()で新規起動できる
+        ようにする。ウィンドウだけが一部閉じられている場合(複数タブの一部)は、
+        閉じられたタブの記録だけを外し、生きているウィンドウへ切り替えておく。
+        """
+        if self._driver is None:
+            return
+        browser_gone = self._browser_process_alive() is False
+        if browser_gone:
+            handles: list = []
+        else:
+            try:
+                handles = self._driver.window_handles
+            except Exception:  # noqa: BLE001
+                handles = []
+        if not handles:
+            logger.warning("ブラウザが閉じられていたため、次の操作で新しく起動し直します")
+            self._shutdown_driver(browser_gone)
+            self._driver = None
+            self._current_site_key = None
+            self._tab_handles = {}
+            self._tab_site_urls = {}
+            self._current_tab_alias = None
+            return
+
+        dead_aliases = [a for a, h in self._tab_handles.items() if h not in handles]
+        for alias in dead_aliases:
+            logger.warning("タブ '%s' は閉じられていたため、記録から外しました", alias)
+            self._tab_handles.pop(alias, None)
+            self._tab_site_urls.pop(alias, None)
+        if self._current_tab_alias in dead_aliases:
+            self._current_tab_alias = None
+            self._current_site_key = None
+        try:
+            if self._driver.current_window_handle not in handles:
+                self._driver.switch_to.window(handles[0])
+        except Exception:  # noqa: BLE001
+            try:
+                self._driver.switch_to.window(handles[0])
+            except Exception:  # noqa: BLE001
+                pass
+
     def _get_driver(self):
+        self._discard_dead_driver()
         if self._driver is None:
             from selenium import webdriver
 
@@ -1862,7 +1952,8 @@ class BrowserHandler:
 
     def close(self) -> str:
         if self._driver is not None:
-            self._driver.quit()
+            # 既に手動で閉じられている等で終了に失敗しても、状態は必ずリセットする
+            self._shutdown_driver(self._browser_process_alive() is False)
             self._driver = None
         self._current_site_key = None
         self._tab_handles = {}

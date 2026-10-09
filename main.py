@@ -716,8 +716,8 @@ def export_run_log(executor: MacroExecutor) -> None:
 # ---------- マクロの.pyスクリプト化 / exe化 ----------
 # 「動作確認が済んで問題なく動くと分かったマクロ」を、他の人に配布したり
 # PyInstallerでexe化したりしやすい単体スクリプトに落とし込む機能。
-# 生成したスクリプトは engine/codegen.py の実装により、For/If/Gotoの
-# ような制御構文を含まない一直線のマクロのみに対応している。
+# 生成したスクリプトは engine/codegen.py の実装により、For/If/Gotoのような
+# 制御構文を含むマクロも、実行エンジンと同じ順序で実行される形に変換される。
 
 def convert_script_to_exe(script_path: Path) -> bool:
     """PyInstallerで.pyファイルを単体exeに変換する(--onefile)。
@@ -770,7 +770,7 @@ def export_menu(executor: MacroExecutor) -> None:
     while True:
         print("マクロのスクリプト化/exe化では何をしますか?")
         print("  1) 登録済みマクロを.pyスクリプトに変換する")
-        print("     (For/If/Gotoを含まない、一直線のマクロのみ対応)")
+        print("     (For繰り返し/If分岐/Gotoを含むマクロも変換できます)")
         print("  2) 既存の.pyファイルをexe化する(要 pip install pyinstaller)")
         print("  0) 戻る")
         choice = input("番号> ").strip()
