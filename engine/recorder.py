@@ -1263,8 +1263,13 @@ class MacroRecorder:
         print("  印刷範囲の指定方法を選んでください:")
         print("    1) 範囲を直接指定する(例: A1:H30)")
         print("    2) 日付と範囲の対応表(別のExcel/txt/csv)から、実行日に合わせて決める")
-        if self._ask("  番号(空Enterで1)> ").strip() == "2":
+        print("    3) シート内の見出しの行/列(今日の日付など)を探し、見つかった位置を基準に決める")
+        mode = self._ask("  番号(空Enterで1)> ").strip()
+        if mode == "2":
             self._record_excel_set_print_area_from_file(sheet_test, sheet_param)
+            return
+        if mode == "3":
+            self._record_excel_set_print_area_by_search(sheet_test, sheet_param)
             return
         range_result = self._ask_sluttable_value("印刷範囲(例: A1:H30)")
         if range_result is None:
@@ -1321,6 +1326,63 @@ class MacroRecorder:
                     "source_sheet": source_sheet, "default_range": default_range,
                 },
             })
+            print("  → 登録しました。\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+
+    def _record_excel_set_print_area_by_search(self, sheet_test: str, sheet_param: str) -> None:
+        print("  シート内の見出しの行(または列)から、探す文字列や式に一致するセルを探し、そのセルを")
+        print("  基準に「横に◯列・縦に◯行」の範囲を印刷範囲にします。毎日1つずつ右にずれるカレンダー")
+        print("  なら、探す文字列に =TODAY() と入れれば「今日の列から」になります。")
+        print("  探す場所を選んでください:")
+        print("    1) 見出しの行を探す(例: 3行目に日付が横に並んでいる)")
+        print("    2) 見出しの列を探す(例: A列に名前が縦に並んでいる)")
+        search_in = "column" if self._ask("  番号(空Enterで1)> ").strip() == "2" else "row"
+        line = self._ask(
+            "  探す行の番号(例: 3): " if search_in == "row" else "  探す列の文字(例: A): "
+        ).strip()
+        if not line:
+            print("  → 入力がないため、この手順は登録しませんでした。\n")
+            return
+        target_raw = self._ask(
+            '  探す文字列、または式(例: =TODAY() / =TODAY()+1 / =TEXT(TODAY(),"m/d")): '
+        ).strip()
+        if not target_raw:
+            print("  → 入力がないため、この手順は登録しませんでした。\n")
+            return
+        match = "contains" if self._ask("  一致の仕方(空Enterで完全一致 / 部分一致なら「部分」と入力): ").strip() in (
+            "部分", "部分一致", "contains") else "exact"
+        try:
+            delta_cols = int(self._ask("  一致したセルから横に何列広げますか?(7日分なら6。空Enterで0): ").strip() or "0")
+            delta_rows = int(self._ask("  一致したセルから縦に何行広げますか?(空Enterで0): ").strip() or "0")
+            offset_cols = int(self._ask("  開始位置を横に何列ずらしますか?(左は負の数。空Enterで0): ").strip() or "0")
+            offset_rows = int(self._ask("  開始位置を縦に何行ずらしますか?(上は負の数。空Enterで0): ").strip() or "0")
+        except ValueError:
+            print("  整数で入力してください。この手順は登録しませんでした。\n")
+            return
+        title_columns = self._ask("  毎回左端に付ける列(担当者名の列など。例: A。不要ならEnter): ").strip()
+        title_rows = self._ask("  毎回上端に付ける行(見出し行など。例: 3。不要ならEnter): ").strip()
+        default_range = self._ask("  一致するセルが無い場合に使う範囲(不要ならEnter。無い場合はエラーで止まります): ").strip()
+
+        target_test = target_raw
+        if "{{" in target_raw and "}}" in target_raw:
+            try:
+                target_test = str(_substitute(target_raw, self.resolution_context(target_raw)))
+            except (KeyError, ValueError, IndexError):
+                target_test = self._ask("  動作確認用に、実際の値に置き換えたものを入力してください: ").strip()
+
+        params = {
+            "sheet_name": sheet_param, "search_in": search_in, "line": line, "target": target_raw,
+            "match": match, "delta_cols": delta_cols, "delta_rows": delta_rows,
+            "offset_cols": offset_cols, "offset_rows": offset_rows,
+            "title_columns": title_columns, "title_rows": title_rows, "default_range": default_range,
+        }
+        try:
+            result = self.excel.set_print_area_by_search(
+                **{**params, "sheet_name": sheet_test, "target": target_test},
+            )
+            print(f"  → 実際に設定できました: {result}")
+            self.steps.append({"handler": "excel", "action": "set_print_area_by_search", "params": params})
             print("  → 登録しました。\n")
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠ {e}\n")

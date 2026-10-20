@@ -58,6 +58,7 @@ RPAでよく使うセル/シート操作:
 """
 from __future__ import annotations
 
+import calendar
 import csv
 import datetime as _dt
 import logging
@@ -199,6 +200,142 @@ def _import_win32com():
             "(pip install pywin32)。Excelがインストールされていない環境や"
             "Windows以外の環境では実行できません。"
         ) from e
+
+
+_WEEKDAY_JA = "月火水木金土日"
+_FORMAT_TOKEN_RE = re.compile(
+    r'"[^"]*"|\\.|\[[^\]]*\]|yyyy|yy|mmmm|mmm|mm|m|dddd|ddd|dd|d|aaaa|aaa|.', re.IGNORECASE,
+)
+_TODAY_EXPR = r"TODAY\(\)\s*(?:([+-])\s*(\d+))?"
+
+
+def _format_excel_date(d: _dt.date, fmt: str) -> str:
+    """日付をExcelの表示形式の文字列(例: "m/d" → "10/20"、"m月d日(aaa)" → "10月20日(火)")に
+    する。対応: yyyy yy mmmm mmm mm m dddd ddd dd d aaaa(月曜日) aaa(月)、
+    "..."で囲んだ文字・\\付きの文字はそのまま、[...]は無視する。
+    """
+    out: list[str] = []
+    for tok in _FORMAT_TOKEN_RE.findall(fmt):
+        low = tok.lower()
+        if len(tok) >= 2 and tok.startswith('"') and tok.endswith('"'):
+            out.append(tok[1:-1])
+        elif len(tok) == 2 and tok.startswith("\\"):
+            out.append(tok[1])
+        elif tok.startswith("["):
+            continue
+        elif low == "yyyy":
+            out.append(f"{d.year:04d}")
+        elif low == "yy":
+            out.append(f"{d.year % 100:02d}")
+        elif low == "mmmm":
+            out.append(calendar.month_name[d.month])
+        elif low == "mmm":
+            out.append(calendar.month_abbr[d.month])
+        elif low == "mm":
+            out.append(f"{d.month:02d}")
+        elif low == "m":
+            out.append(str(d.month))
+        elif low == "dddd":
+            out.append(calendar.day_name[d.weekday()])
+        elif low == "ddd":
+            out.append(calendar.day_abbr[d.weekday()])
+        elif low == "dd":
+            out.append(f"{d.day:02d}")
+        elif low == "d":
+            out.append(str(d.day))
+        elif low == "aaaa":
+            out.append(_WEEKDAY_JA[d.weekday()] + "曜日")
+        elif low == "aaa":
+            out.append(_WEEKDAY_JA[d.weekday()])
+        else:
+            out.append(tok)
+    return "".join(out)
+
+
+def _as_date(value: Any) -> _dt.date:
+    return value.date() if isinstance(value, _dt.datetime) else value
+
+
+def _display_from_format(value: Any, number_format: str) -> str | None:
+    """日付セルが、表示形式(number_format)によって画面でどう見えるかを再現する
+    (日付以外・標準の表示形式のときはNone)。"""
+    if isinstance(value, (_dt.date, _dt.datetime)) and number_format and number_format != "General":
+        try:
+            return _format_excel_date(_as_date(value), number_format)
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def _com_display(ws, row: int, col: int) -> str | None:
+    """COMのセルの、画面に表示されている文字列。列幅が足りず"####"になっている
+    場合は、値と表示形式から再現する。"""
+    cell = ws.Cells(row, col)
+    shown = cell.Text
+    if shown and not str(shown).startswith("#"):
+        return str(shown)
+    return _display_from_format(cell.Value, cell.NumberFormat)
+
+
+def _evaluate_search_target(target: str) -> tuple[str, Any]:
+    """find_cell_in_line / set_print_area_by_search の探す対象を評価する。
+    戻り値: ("date", 日付) または ("text", 文字列)。
+    対応する式: =TODAY() / =TODAY()+N / =TODAY()-N(日付として比較)、
+    =TEXT(TODAY(),"m/d") / =TEXT(TODAY()+1,"m月d日(aaa)")(Excelの書式で文字にしたものと比較)。
+    """
+    text = str(target).strip()
+    if not text:
+        raise ValueError("探す文字列(または =TODAY() のような式)を指定してください")
+    if not text.startswith("="):
+        return "text", text
+
+    def shifted(sign: str | None, num: str | None) -> _dt.date:
+        days = int(num) if num else 0
+        return _dt.date.today() + _dt.timedelta(days=-days if sign == "-" else days)
+
+    m = re.fullmatch(rf"=\s*{_TODAY_EXPR}", text, re.IGNORECASE)
+    if m:
+        return "date", shifted(m.group(1), m.group(2))
+    m = re.fullmatch(rf'=\s*TEXT\s*\(\s*{_TODAY_EXPR}\s*,\s*"([^"]*)"\s*\)', text, re.IGNORECASE)
+    if m:
+        return "text", _format_excel_date(shifted(m.group(1), m.group(2)), m.group(3))
+    raise ValueError(
+        f"この式には対応していません: {text}"
+        '(使える式: =TODAY() / =TODAY()+1 / =TEXT(TODAY(),"m/d") のように、'
+        "今日の日付に日数を加減したもの)"
+    )
+
+
+def _cell_matches(value: Any, display, kind: str, wanted: Any, mode: str) -> bool:
+    """セルの値(と表示)が、探す対象に一致するか。kind="date"は日付どうし、
+    kind="text"は文字列(日付セルの場合は画面の表示や yyyy/mm/dd とも)を比べる。"""
+    if value is None:
+        return False
+    is_date = isinstance(value, (_dt.date, _dt.datetime))
+    if kind == "date":
+        if is_date:
+            return _as_date(value) == wanted
+        if isinstance(value, str):
+            try:
+                return _parse_date(value) == wanted
+            except ValueError:
+                return False
+        return False
+
+    candidates: list[str] = []
+    if is_date:
+        shown = display()
+        if shown:
+            candidates.append(str(shown))
+        candidates.append(f"{_as_date(value):%Y/%m/%d}")
+    else:
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        candidates.append(str(value))
+    candidates = [c.strip() for c in candidates]
+    if mode == "contains":
+        return any(wanted in c for c in candidates)
+    return any(c == wanted for c in candidates)
 
 
 class ExcelHandler:
@@ -814,6 +951,10 @@ class ExcelHandler:
                 ps.PaperSize = _PAPER_SIZES[settings["paper"]]
             if "area" in settings:
                 ps.PrintArea = settings["area"]
+            if "title_cols" in settings:
+                ps.PrintTitleColumns = settings["title_cols"]
+            if "title_rows" in settings:
+                ps.PrintTitleRows = settings["title_rows"]
             if "pages_tall" in settings:
                 ps.Zoom = False  # これを先に外さないと、FitToPages指定が効かない
                 ps.FitToPagesTall = settings["pages_tall"]
@@ -929,6 +1070,184 @@ class ExcelHandler:
         target = _parse_date(date) if str(date).strip() else _dt.date.today()
         result = self.set_print_area(sheet_name, cell_range)
         return f"{target:%Y/%m/%d} の範囲を対応表から取り出しました。{result}"
+
+    def _search_line_cells(self, entry: dict[str, Any], sheet_name: str, search_in: str, line: Any):
+        """検索する行(または列)のセルを、先頭から順に (1始まりの位置, 値, 表示文字列を返す関数)
+        として返す。表示文字列は、日付セルが「10/20」のように表示されている場合の
+        その見た目(COMはExcelの表示そのまま、openpyxlは表示形式から再現)。"""
+        axis = "row" if str(search_in).strip().lower() in ("row", "行") else "column"
+        if axis == "row":
+            try:
+                index = int(str(line).strip())
+            except ValueError as e:
+                raise ValueError(f"探す行は行番号(数字)で指定してください: {line}") from e
+        else:
+            text = str(line).strip().upper()
+            index = int(text) if text.isdigit() else column_index_from_string(text)
+        if index < 1:
+            raise ValueError(f"探す{'行' if axis == 'row' else '列'}の指定が不正です: {line}")
+
+        cells: list[tuple[int, Any, Any]] = []
+        if entry.get("com"):
+            ws = self._com_sheet(entry, sheet_name)
+            used = ws.UsedRange
+            last_row = used.Row + used.Rows.Count - 1
+            last_col = used.Column + used.Columns.Count - 1
+            if axis == "row":
+                rng = ws.Range(ws.Cells(index, 1), ws.Cells(index, last_col))
+                values = rng.Value[0] if last_col > 1 else (rng.Value,)
+                for pos, value in enumerate(values, start=1):
+                    cells.append((pos, value, lambda r=index, c=pos: _com_display(ws, r, c)))
+            else:
+                rng = ws.Range(ws.Cells(1, index), ws.Cells(last_row, index))
+                values = [row[0] for row in rng.Value] if last_row > 1 else [rng.Value]
+                for pos, value in enumerate(values, start=1):
+                    cells.append((pos, value, lambda r=pos, c=index: _com_display(ws, r, c)))
+        else:
+            wb = entry["wb"]
+            if sheet_name not in wb.sheetnames:
+                raise KeyError(f"シートが見つかりません: {sheet_name}")
+            ws = wb[sheet_name]
+            count = ws.max_column if axis == "row" else ws.max_row
+            for pos in range(1, count + 1):
+                cell = ws.cell(row=index, column=pos) if axis == "row" else ws.cell(row=pos, column=index)
+                cells.append((pos, cell.value, lambda cell=cell: _display_from_format(cell.value, cell.number_format)))
+        return axis, index, cells
+
+    def find_cell_in_line(
+        self, sheet_name: str, search_in: str, line: Any, target: str, match: str = "exact",
+    ) -> str:
+        """指定した行(search_in="row"・lineは行番号)または列(search_in="column"・
+        lineは列文字)の中から、targetに一致する最初のセルを探し、そのアドレス
+        (例: "M3")を返す。store_as で変数に保存して使うこともできる。
+        target: 探す文字列。先頭が"="なら式として評価する(対応: =TODAY() /
+          =TODAY()+1 のような日数の加減 / =TEXT(TODAY(),"m/d") のように日付を
+          Excelの書式文字列で文字にしたもの)。=TODAY()系は日付セルと日付として
+          比べ、=TEXT(...)や普通の文字列は、セルの値と、日付セルの場合は画面の
+          表示("10/20"等)の両方と比べる。
+        match: "exact"(完全一致)/ "contains"(部分一致)。
+        """
+        kind, wanted = _evaluate_search_target(target)
+        mode = str(match).strip().lower()
+        if mode in ("部分一致", "含む"):
+            mode = "contains"
+        elif mode in ("完全一致", ""):
+            mode = "exact"
+        if mode not in ("exact", "contains"):
+            raise ValueError(f"matchは exact(完全一致)か contains(部分一致)で指定してください: {match}")
+
+        entry = self._active()
+        axis, index, cells = self._search_line_cells(entry, sheet_name, search_in, line)
+        for pos, value, display in cells:
+            if _cell_matches(value, display, kind, wanted, mode):
+                return f"{get_column_letter(pos)}{index}" if axis == "row" else f"{get_column_letter(index)}{pos}"
+        where = f"{index}行目" if axis == "row" else f"{get_column_letter(index)}列"
+        shown = wanted if kind == "text" else f"{wanted:%Y/%m/%d}"
+        raise KeyError(
+            f"シート '{sheet_name}' の{where}に、'{target}'(= {shown})と一致するセルが見つかりません"
+        )
+
+    @staticmethod
+    def _normalize_title_spec(spec: str, kind: str) -> str:
+        """印刷タイトルの指定(列: "A" / "A:B"、行: "3" / "1:3")をExcelの形式
+        ($A:$A / $3:$3)にする。空欄なら空文字(指定なし)。"""
+        text = str(spec or "").strip().replace("$", "").upper()
+        if not text:
+            return ""
+        pattern = r"[A-Z]{1,3}(:[A-Z]{1,3})?" if kind == "cols" else r"[0-9]+(:[0-9]+)?"
+        if not re.fullmatch(pattern, text):
+            example = "A または A:B" if kind == "cols" else "3 または 1:3"
+            raise ValueError(
+                f"印刷タイトルの{'列' if kind == 'cols' else '行'}の書式が正しくありません: '{spec}'(例: {example})"
+            )
+        parts = text.split(":")
+        if len(parts) == 1:
+            parts = parts * 2
+        return f"${parts[0]}:${parts[1]}"
+
+    def set_print_area_by_search(
+        self, sheet_name: str, search_in: str = "row", line: Any = 1, target: str = "",
+        match: str = "exact", delta_cols: int = 0, delta_rows: int = 0,
+        offset_cols: int = 0, offset_rows: int = 0,
+        title_columns: str = "", title_rows: str = "", default_range: str = "",
+    ) -> str:
+        """開いているシートの特定の行(または列)から、targetに一致するセルを探し、
+        そのセルを基準にした範囲を印刷範囲に設定する。毎日1つずつ右(または下)に
+        ずれていくカレンダー等で、「今日の列から1週間分」を自動で印刷するための機能。
+
+        一致したセルの位置を (行r, 列c) とすると、
+          開始 = (r + offset_rows, c + offset_cols)
+          終了 = 開始 + (delta_rows, delta_cols)
+        の範囲を印刷範囲にする(delta=0なら開始と同じ位置まで。例: 見出しが3行目に
+        日付で並び、今日の列から7日分・担当4行分なら、search_in="row", line=3,
+        target="=TODAY()", delta_cols=6, delta_rows=4 → 例: M3:S7)。deltaや
+        offsetに負の数を指定すれば、左・上へ広げることもできる。
+        search_in/line/target/match は find_cell_in_line と同じ。
+        title_columns(例: "A" / "A:B")・title_rows(例: "3" / "1:3"): 印刷範囲が
+        右(下)にずれても、名前の列/見出しの行を毎回同じページの左端(上端)に
+        付けて印刷する「印刷タイトル」。担当者名の列を一緒に出したいときに使う。
+        default_range: 一致するセルが無かったときに使う範囲(空欄ならエラーで止まる)。
+        この設定は save_as_pdf のPDF出力にも反映される。
+        """
+        try:
+            d_cols, d_rows = int(delta_cols), int(delta_rows)
+            o_cols, o_rows = int(offset_cols), int(offset_rows)
+        except (TypeError, ValueError) as e:
+            raise ValueError("広げる幅・開始位置のずらしは整数で指定してください") from e
+        t_cols = self._normalize_title_spec(title_columns, "cols")
+        t_rows = self._normalize_title_spec(title_rows, "rows")
+
+        try:
+            matched = self.find_cell_in_line(sheet_name, search_in, line, target, match)
+        except KeyError:
+            if not str(default_range).strip():
+                raise
+            matched = None
+
+        if matched is None:
+            cell_range = self._normalize_cell_range(default_range)
+            note = "一致するセルが無かったため既定の範囲を使いました"
+        else:
+            m = re.fullmatch(r"([A-Z]+)(\d+)", matched)
+            col, row = column_index_from_string(m.group(1)), int(m.group(2))
+            start_col, start_row = col + o_cols, row + o_rows
+            end_col, end_row = start_col + d_cols, start_row + d_rows
+            c1, c2 = sorted((start_col, end_col))
+            r1, r2 = sorted((start_row, end_row))
+            if c1 < 1 or r1 < 1:
+                raise ValueError(
+                    f"一致したセル({matched})から計算した範囲がシートの外にはみ出します"
+                    f"(開始 {get_column_letter(max(c1, 1))}{max(r1, 1)} 付近。ずらし/広げる幅を見直してください)"
+                )
+            cell_range = f"{get_column_letter(c1)}{r1}:{get_column_letter(c2)}{r2}"
+            note = f"一致したセル: {matched}"
+
+        result = self.set_print_area(sheet_name, cell_range)
+        entry = self._active()
+        settings = self._print_settings(entry, sheet_name)
+        if t_cols or t_rows:
+            if entry.get("com"):
+                ws = self._com_sheet(entry, sheet_name)
+                self._apply_page_settings_com(ws, {k: v for k, v in (("title_cols", t_cols), ("title_rows", t_rows)) if v})
+            else:
+                ws = entry["wb"][sheet_name]
+                if t_cols:
+                    ws.print_title_cols = t_cols.replace("$", "")
+                if t_rows:
+                    ws.print_title_rows = t_rows.replace("$", "")
+            if t_cols:
+                settings["title_cols"] = t_cols
+            if t_rows:
+                settings["title_rows"] = t_rows
+        def short(spec: str) -> str:
+            a, b = spec.replace("$", "").split(":")
+            return a if a == b else f"{a}:{b}"
+
+        titles = "".join([
+            f"、印刷タイトル(列 {short(t_cols)})" if t_cols else "",
+            f"、印刷タイトル(行 {short(t_rows)})" if t_rows else "",
+        ])
+        return f"{note}。{result}{titles}"
 
     def save_workbook_as(self, output_path: str) -> str:
         entry = self._active()

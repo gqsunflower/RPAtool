@@ -2846,8 +2846,9 @@ class RecorderApp(_AppBase):
         elif action == "印刷範囲を指定する":
             ttk.Label(
                 f, text="印刷範囲を設定します。この設定は、同じファイルに対する「PDFとして保存する」の"
-                "PDF出力に反映されます。範囲は直接指定するか、日付ごとの範囲を書いた別ファイルから"
-                "実行日に合わせて自動で切り替えられます。",
+                "PDF出力に反映されます。範囲は、直接指定するか、日付ごとの範囲を書いた別ファイルから"
+                "実行日に合わせて決めるか、シート内の見出し(今日の日付など)を探して、見つかった位置を"
+                "基準に決められます。",
                 foreground="#557", wraplength=420, justify="left",
             ).pack(anchor="w", pady=(0, 4))
             sheet_field = ValueSlotField(f, "対象シート名")
@@ -2859,8 +2860,12 @@ class RecorderApp(_AppBase):
             ttk.Radiobutton(mode_row, text="範囲を直接指定", variable=mode_var, value="direct").pack(
                 side="left", padx=(0, 10))
             ttk.Radiobutton(
-                mode_row, text="日付と範囲の対応表(別ファイル)から実行日に合わせて決める",
+                mode_row, text="日付と範囲の対応表(別ファイル)から決める",
                 variable=mode_var, value="file",
+            ).pack(side="left", padx=(0, 10))
+            ttk.Radiobutton(
+                mode_row, text="見出しの行/列から探した位置を基準に決める",
+                variable=mode_var, value="search",
             ).pack(side="left")
 
             direct_frame = ttk.Frame(f)
@@ -2890,10 +2895,63 @@ class RecorderApp(_AppBase):
             )
             default_field.pack(fill="x", pady=2)
 
+            search_frame = ttk.Frame(f)
+            ttk.Label(
+                search_frame, text="シート内の見出しの行(または列)から、探す文字列や式に一致するセルを探し、"
+                "そのセルを基準に「横に◯列・縦に◯行」の範囲を印刷範囲にします。毎日1つずつ右にずれる"
+                "カレンダーなら、探す文字列に =TODAY() と入れれば「今日の列から」になります。\n"
+                "例)日付が3行目に並び、今日から7日分・担当4人分 → 探す行=3、探す文字列==TODAY()、"
+                "横に広げる列数=6、縦に広げる行数=4(一致したセルの位置から数える)。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
+            axis_var = tk.StringVar(value="row")
+            axis_row = ttk.Frame(search_frame)
+            axis_row.pack(anchor="w", pady=2)
+            ttk.Label(axis_row, text="探す場所").pack(side="left", padx=(0, 6))
+            ttk.Radiobutton(axis_row, text="見出しの行を探す", variable=axis_var, value="row").pack(
+                side="left", padx=(0, 10))
+            ttk.Radiobutton(axis_row, text="見出しの列を探す", variable=axis_var, value="column").pack(side="left")
+            line_field = PlainField(search_frame, "探す行の番号(例: 3)/ 探す列の文字(例: A)", default="3", width=10)
+            line_field.pack(fill="x", pady=2)
+            target_field = PlainField(
+                search_frame, '探す文字列、または式(例: =TODAY() / =TODAY()+1 / =TEXT(TODAY(),"m/d"))',
+                default="=TODAY()", width=28,
+            )
+            target_field.pack(fill="x", pady=2)
+            match_var = tk.StringVar(value="exact")
+            match_row = ttk.Frame(search_frame)
+            match_row.pack(anchor="w", pady=2)
+            ttk.Label(match_row, text="一致の仕方").pack(side="left", padx=(0, 6))
+            ttk.Radiobutton(match_row, text="完全一致", variable=match_var, value="exact").pack(
+                side="left", padx=(0, 10))
+            ttk.Radiobutton(match_row, text="部分一致", variable=match_var, value="contains").pack(side="left")
+            dcols_field = PlainField(search_frame, "一致したセルから横に何列広げるか(7日分なら6)", default="6", width=8)
+            dcols_field.pack(fill="x", pady=2)
+            drows_field = PlainField(search_frame, "一致したセルから縦に何行広げるか(見出し+4人分なら4)", default="4", width=8)
+            drows_field.pack(fill="x", pady=2)
+            ocols_field = PlainField(search_frame, "(任意)開始位置を横に何列ずらすか(左は負の数)", default="0", width=8)
+            ocols_field.pack(fill="x", pady=2)
+            orows_field = PlainField(search_frame, "(任意)開始位置を縦に何行ずらすか(上は負の数)", default="0", width=8)
+            orows_field.pack(fill="x", pady=2)
+            tcols_field = PlainField(
+                search_frame, "(任意)毎回左端に付ける列(担当者名の列など。例: A)", width=8,
+            )
+            tcols_field.pack(fill="x", pady=2)
+            trows_field = PlainField(
+                search_frame, "(任意)毎回上端に付ける行(見出し行など。例: 3 や 1:3)", width=8,
+            )
+            trows_field.pack(fill="x", pady=2)
+            sdefault_field = PlainField(
+                search_frame, "(任意)一致するセルが無い場合に使う範囲(空欄ならエラーで止める)", width=20,
+            )
+            sdefault_field.pack(fill="x", pady=2)
+
+            frames_by_mode = {"direct": direct_frame, "file": file_frame, "search": search_frame}
+
             def refresh_mode(*_args):
-                direct_frame.pack_forget()
-                file_frame.pack_forget()
-                (direct_frame if mode_var.get() == "direct" else file_frame).pack(fill="x")
+                for frame in frames_by_mode.values():
+                    frame.pack_forget()
+                frames_by_mode[mode_var.get()].pack(fill="x")
 
             mode_var.trace_add("write", refresh_mode)
             refresh_mode()
@@ -2908,6 +2966,43 @@ class RecorderApp(_AppBase):
                         self.register_step({
                             "handler": "excel", "action": "set_print_area",
                             "params": {"sheet_name": sheet_param, "cell_range": range_param},
+                        })
+                    except Exception as e:  # noqa: BLE001
+                        self.log(f"⚠ {e}")
+                    return
+
+                if mode_var.get() == "search":
+                    try:
+                        dcols = int(dcols_field.get().strip() or "0")
+                        drows = int(drows_field.get().strip() or "0")
+                        ocols = int(ocols_field.get().strip() or "0")
+                        orows = int(orows_field.get().strip() or "0")
+                    except ValueError:
+                        self.log("⚠ 広げる列数・行数、ずらす数は整数で入力してください")
+                        return
+                    target_raw = target_field.get().strip()
+                    if not target_raw:
+                        self.log("⚠ 探す文字列(または =TODAY() のような式)を入力してください")
+                        return
+                    target_test = self._resolve_test_value(target_raw)
+                    if target_test is None:
+                        self.log("→ 動作確認用の値が入力されなかったため、登録を中止しました")
+                        return
+                    params = {
+                        "sheet_name": sheet_param, "search_in": axis_var.get(),
+                        "line": line_field.get().strip(), "target": target_raw,
+                        "match": match_var.get(), "delta_cols": dcols, "delta_rows": drows,
+                        "offset_cols": ocols, "offset_rows": orows,
+                        "title_columns": tcols_field.get().strip(), "title_rows": trows_field.get().strip(),
+                        "default_range": sdefault_field.get().strip(),
+                    }
+                    try:
+                        result = self.recorder.excel.set_print_area_by_search(
+                            **{**params, "sheet_name": sheet_test, "target": str(target_test)},
+                        )
+                        self.log(f"→ {result}")
+                        self.register_step({
+                            "handler": "excel", "action": "set_print_area_by_search", "params": params,
                         })
                     except Exception as e:  # noqa: BLE001
                         self.log(f"⚠ {e}")
