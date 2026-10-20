@@ -220,6 +220,96 @@ class PdfHandler:
         logger.info("ページ範囲を抜き出しました(%d〜%d): %s -> %s", start_page, end_page, p, out)
         return str(out)
 
+    _IMAGE_FORMATS = {
+        ".png": "PNG", ".jpg": "JPEG", ".jpeg": "JPEG", ".bmp": "BMP",
+        ".tif": "TIFF", ".tiff": "TIFF", ".webp": "WEBP",
+    }
+    _MAX_IMAGE_PIXELS = 300_000_000  # 連結後の画像が巨大すぎてメモリを使い切るのを防ぐ
+    _JPEG_MAX_SIDE = 65500  # JPEG形式の仕様上の上限(1辺の長さ)
+
+    def pdf_to_image(
+        self, input_path: str, output_path: str, dpi: int = 150,
+        direction: str = "vertical", start_page: int | None = None, end_page: int | None = None,
+    ) -> str:
+        """PDF(複数ページでも可)を、画像ファイル1枚に変換して保存する。
+        複数ページは、ページ順に1枚の画像へ連結する(direction="vertical"で
+        縦に並べる/"horizontal"で横に並べる。幅や高さがページごとに違う場合は、
+        足りない部分を白で埋める)。
+        output_path の拡張子で形式が決まる(.png / .jpg / .jpeg / .bmp / .tif /
+        .tiff / .webp)。dpiは解像度(既定150。大きいほど鮮明だが画像が巨大に
+        なる)。start_page/end_pageで一部のページだけ(1始まり・両端含む)にもできる
+        (省略時は全ページ)。pypdfiumによる描画のため、PopplerなどOS側の
+        追加インストールは不要。
+        """
+        p = Path(input_path)
+        if not p.exists():
+            raise FileNotFoundError(f"PDFが見つかりません: {p}")
+        out = Path(output_path)
+        fmt = self._IMAGE_FORMATS.get(out.suffix.lower())
+        if fmt is None:
+            raise ValueError(
+                f"画像の形式を判別できません: '{out.suffix}'"
+                f"(出力ファイル名の拡張子は {' / '.join(self._IMAGE_FORMATS)} のいずれかにしてください)"
+            )
+        direction_key = str(direction).strip().lower()
+        if direction_key in ("縦", "縦に連結", "vertical"):
+            direction_key = "vertical"
+        elif direction_key in ("横", "横に連結", "horizontal"):
+            direction_key = "horizontal"
+        else:
+            raise ValueError(f"連結方向は vertical(縦に並べる)か horizontal(横に並べる)で指定してください: {direction}")
+        try:
+            dpi = int(dpi)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"dpiは整数で指定してください: {dpi}") from e
+        if not (30 <= dpi <= 600):
+            raise ValueError(f"dpiは30〜600で指定してください: {dpi}")
+
+        from PIL import Image
+
+        with pdfplumber.open(str(p)) as pdf:
+            total = len(pdf.pages)
+            first = 1 if start_page is None else int(start_page)
+            last = total if end_page is None else int(end_page)
+            if first < 1 or last > total or first > last:
+                raise ValueError(f"ページ範囲が不正です(全{total}ページ): {first}〜{last}")
+            pages = [
+                pdf.pages[i].to_image(resolution=dpi).original.convert("RGB")
+                for i in range(first - 1, last)
+            ]
+
+        if direction_key == "vertical":
+            width, height = max(im.width for im in pages), sum(im.height for im in pages)
+        else:
+            width, height = sum(im.width for im in pages), max(im.height for im in pages)
+        if width * height > self._MAX_IMAGE_PIXELS:
+            raise ValueError(
+                f"連結後の画像が大きすぎます({width}x{height}ピクセル)。"
+                "dpiを下げるか、ページ範囲を絞ってください。"
+            )
+        if fmt == "JPEG" and max(width, height) > self._JPEG_MAX_SIDE:
+            raise ValueError(
+                f"連結後の画像({width}x{height}ピクセル)はJPEGの上限を超えています。"
+                "PNG形式にするか、dpiを下げる/ページ範囲を絞ってください。"
+            )
+
+        canvas = Image.new("RGB", (width, height), "white")
+        offset = 0
+        for im in pages:
+            if direction_key == "vertical":
+                canvas.paste(im, (0, offset))
+                offset += im.height
+            else:
+                canvas.paste(im, (offset, 0))
+                offset += im.width
+
+        out.parent.mkdir(parents=True, exist_ok=True)
+        save_kwargs = {"quality": 95} if fmt in ("JPEG", "WEBP") else {}
+        canvas.save(out, format=fmt, **save_kwargs)
+        logger.info("PDFを画像1枚に変換しました(%dページ, %dx%d, dpi=%d): %s -> %s",
+                    len(pages), width, height, dpi, p, out)
+        return str(out)
+
     def rotate_pdf(
         self,
         input_path: str,

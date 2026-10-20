@@ -10,8 +10,9 @@ pywin32が必要)。動作を目で見て確認しながらマクロを組み立
 では既定でこちらを使う)に使う。ただし対応している操作は限られており
 (create_workbook/load_workbook/switch_workbook/close_workbook/write_cells/
 get_cell_value/get_last_row/get_last_column/get_sheet_names/create_sheet/
-rename_sheet/save_workbook/save_workbook_as)、それ以外(copy_cell_range/
-copy_sheet/set_print_area/get_range_as_list/find_cell/append_row/
+rename_sheet/save_workbook/save_workbook_as/set_print_area/set_page_layout/
+set_print_area_from_file/lookup_range_for_date)、それ以外(copy_cell_range/
+copy_sheet/get_range_as_list/find_cell/append_row/
 insert_rows/delete_rows/clear_range/delete_sheet/read_sheet_to_records/
 write_records_to_csv)は可視化モードのブックに対して呼ぶとエラーになる
 (その手順だけ非可視化モードのブックで行うか、動作確認が済んだら
@@ -37,6 +38,12 @@ RPAでよく使うセル/シート操作:
   create_sheet(新規シート追加)、rename_sheet(既存シート名の変更)、
   get_sheet_names(シート名一覧)、set_print_area(印刷範囲の指定) に対応。
 
+印刷範囲・ページ設定とPDF出力:
+  set_print_area(印刷範囲)/set_page_layout(用紙サイズ・向き・縦横の枚数)/
+  set_print_area_from_file(別ファイルの「日付,範囲」の対応表から、実行日に
+  合わせて印刷範囲を決める。lookup_range_for_dateで範囲だけを取り出すことも
+  可)で設定した内容は、同じファイルを対象にした save_as_pdf のPDFに反映される。
+
 そのほか以下の2つの操作は、openpyxlでは実現できない
 (openpyxlはファイル形式としての読み書きのみで、実際にExcelアプリケーションを
 描画・実行する機能を持たないため)常にCOM経由で実際のExcelを操作する
@@ -44,7 +51,7 @@ RPAでよく使うセル/シート操作:
 パスを直接指定するため、複数ブックの「アクティブ切り替え」とは独立して、
 どのファイルに対しても実行できる:
 
-- save_as_pdf: あらかじめ設定された印刷範囲・ページ設定のままPDFへ書き出す
+- save_as_pdf: 印刷範囲・ページ設定(このツールで設定した内容を含む)を反映してPDFへ書き出す
 - run_excel_macro: .xlsmに既に組み込まれているVBAマクロを実行する
 
 いずれもネットワークアクセスは一切行いません。
@@ -52,22 +59,123 @@ RPAでよく使うセル/シート操作:
 from __future__ import annotations
 
 import csv
+import datetime as _dt
 import logging
+import re
 from copy import copy as _copy_style
 from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.worksheet.properties import PageSetupProperties
 
 logger = logging.getLogger("rpa_local_ai.excel")
 
 _MACRO_ENABLED_EXTENSIONS = {".xlsm", ".xltm"}
+_EXCEL_FILE_EXTENSIONS = {".xlsx", ".xlsm", ".xltx", ".xltm"}
 
 # Excelの定数(win32comを遅延・非gencacheで使っているためwin32com.client.constants
 # が使えず、数値をそのまま指定している。値はExcelのバージョンに依らず安定)
 _XL_UP = -4162
 _XL_TO_LEFT = -4159
+_XL_ORIENTATION = {"portrait": 1, "landscape": 2}  # xlPortrait / xlLandscape
+# xlPaperSize(openpyxlのpage_setup.paperSizeも同じ番号)。B4/B5はJIS規格
+_PAPER_SIZES = {"A3": 8, "A4": 9, "A5": 11, "B4": 12, "B5": 13, "LETTER": 1, "LEGAL": 5}
+_MAX_FIT_PAGES = 100
+
+_CELL_RANGE_RE = re.compile(r"[A-Z]{1,3}[0-9]+(:[A-Z]{1,3}[0-9]+)?")
+_DATE_RE = re.compile(r"(\d{4})\D+(\d{1,2})\D+(\d{1,2})")
+
+
+def _normalize_paper_size(paper_size: str) -> str:
+    key = str(paper_size).strip().upper().replace("(JIS)", "").replace("JIS", "").replace(" ", "")
+    if key not in _PAPER_SIZES:
+        raise ValueError(
+            f"用紙サイズが未対応です: {paper_size}(使えるもの: A3 / A4 / A5 / B4 / B5 / Letter / Legal)"
+        )
+    return key
+
+
+def _normalize_orientation(orientation: str) -> str:
+    key = str(orientation).strip().lower()
+    if key in ("portrait", "縦", "縦向き", "たて"):
+        return "portrait"
+    if key in ("landscape", "横", "横向き", "よこ"):
+        return "landscape"
+    raise ValueError(f"向きは portrait(縦向き)か landscape(横向き)で指定してください: {orientation}")
+
+
+def _parse_date(value: Any) -> _dt.date:
+    """"2026/10/20" "2026-10-20" "2026年10月20日" "20261020" やExcelの日付セルの値を
+    dateにする。年が無い等で日付として読めない場合はValueError。
+    """
+    if isinstance(value, _dt.datetime):
+        return value.date()
+    if isinstance(value, _dt.date):
+        return value
+    text = str(value).strip()
+    m = _DATE_RE.search(text)
+    if m is None and re.fullmatch(r"\d{8}", text):
+        m = re.match(r"(\d{4})(\d{2})(\d{2})", text)
+    if m is None:
+        raise ValueError(f"日付として読めません: '{value}'(例: 2026/10/20)")
+    try:
+        return _dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError as e:
+        raise ValueError(f"存在しない日付です: '{value}'") from e
+
+
+def _read_date_range_table(path: Path, source_sheet: str = "") -> list[tuple[_dt.date, str]]:
+    """「日付, セル範囲」の対応表(Excelまたはテキスト)を [(日付, 範囲), ...] で返す。
+    日付として読めない行(見出し・空行・コメント)は読み飛ばす。
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"日付と範囲の対応表が見つかりません: {path}")
+    pairs: list[tuple[Any, Any]] = []
+    if path.suffix.lower() in _EXCEL_FILE_EXTENSIONS:
+        wb = load_workbook(filename=path, read_only=True, data_only=True)
+        try:
+            if source_sheet:
+                if source_sheet not in wb.sheetnames:
+                    raise KeyError(f"対応表のシートが見つかりません: {source_sheet}(存在: {wb.sheetnames})")
+                ws = wb[source_sheet]
+            else:
+                ws = wb.worksheets[0]
+            for row in ws.iter_rows(min_col=1, max_col=2, values_only=True):
+                pairs.append((row[0], row[1] if len(row) > 1 else None))
+        finally:
+            wb.close()
+    else:
+        raw = path.read_bytes()
+        for enc in ("utf-8-sig", "cp932"):
+            try:
+                text = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            raise ValueError(f"対応表の文字コードを判別できませんでした(UTF-8かShift_JISで保存してください): {path}")
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = re.split(r"[,\t]", line, maxsplit=1)
+            if len(parts) < 2:
+                parts = re.split(r"\s+", line, maxsplit=1)
+            if len(parts) < 2:
+                continue
+            pairs.append((parts[0].strip().strip('"'), parts[1].strip().strip('"')))
+
+    rows: list[tuple[_dt.date, str]] = []
+    for raw_date, raw_range in pairs:
+        if raw_date is None or raw_range is None or not str(raw_range).strip():
+            continue
+        try:
+            rows.append((_parse_date(raw_date), str(raw_range).strip()))
+        except ValueError:
+            continue  # 見出し行など
+    return rows
 
 
 def _com_value_to_str(value: Any) -> str:
@@ -667,16 +775,160 @@ class ExcelHandler:
         new_ws.title = new_sheet_name
         return new_sheet_name
 
+    # ---------- 印刷範囲・ページ設定(PDF出力に反映される) ----------
+    # set_print_area / set_page_layout / set_print_area_from_file で設定した内容は、
+    # ブックごと・シートごとに entry["print_settings"] に記録され、同じファイルを
+    # 対象にした save_as_pdf のPDF出力にそのまま反映される(openpyxlでメモリ上に
+    # 持っているだけの設定は、ディスク上のファイルには入っていないため、
+    # PDF出力時に実際のExcel(COM)へ同じ設定を適用してから書き出す)。
+
+    def _print_settings(self, entry: dict[str, Any], sheet_name: str) -> dict[str, Any]:
+        return entry.setdefault("print_settings", {}).setdefault(sheet_name, {})
+
+    def _sheet_names_of(self, entry: dict[str, Any]) -> list[str]:
+        if entry.get("com"):
+            return [s.Name for s in entry["wb"].Sheets]
+        return list(entry["wb"].sheetnames)
+
+    @staticmethod
+    def _normalize_cell_range(cell_range: str) -> str:
+        """印刷範囲の書式(例: A1:K19 / $A$1:$K$19 / A1)を確認し、$を除いた形に揃える。
+        "G50:X:88" のような書き間違いは、後続の処理で分かりにくいエラーになる前に
+        ここで分かりやすいエラーにする。
+        """
+        text = str(cell_range).strip().replace("$", "").upper()
+        if not _CELL_RANGE_RE.fullmatch(text):
+            raise ValueError(
+                f"印刷範囲の書式が正しくありません: '{cell_range}'"
+                "(例: A1:K19 のように「列+行:列+行」で指定してください)"
+            )
+        return text
+
+    def _apply_page_settings_com(self, ws, settings: dict[str, Any]) -> None:
+        """記録済みの印刷設定(範囲/用紙/向き/枚数)を、COMのワークシートへ適用する。"""
+        try:
+            ps = ws.PageSetup
+            if "orientation" in settings:
+                ps.Orientation = _XL_ORIENTATION[settings["orientation"]]
+            if "paper" in settings:
+                ps.PaperSize = _PAPER_SIZES[settings["paper"]]
+            if "area" in settings:
+                ps.PrintArea = settings["area"]
+            if "pages_tall" in settings:
+                ps.Zoom = False  # これを先に外さないと、FitToPages指定が効かない
+                ps.FitToPagesTall = settings["pages_tall"]
+                ps.FitToPagesWide = settings["pages_wide"]
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(
+                f"印刷設定をExcelへ反映できませんでした(シート '{ws.Name}'): {e}"
+                "(既定のプリンターが1台も無い環境では、Excelがページ設定を変更できず、"
+                "この問題が起きることがあります)"
+            ) from e
+
     def set_print_area(self, sheet_name: str, cell_range: str) -> str:
-        """指定範囲(例: "A1:H30")をそのシートの印刷範囲に設定する。"""
+        """指定範囲(例: "A1:H30")をそのシートの印刷範囲に設定する。この設定は、
+        同じファイルに対する save_as_pdf のPDF出力にも反映される。
+        """
+        cell_range = self._normalize_cell_range(cell_range)
         entry = self._active()
-        self._require_openpyxl(entry, "set_print_area")
-        wb = entry["wb"]
-        if sheet_name not in wb.sheetnames:
-            raise KeyError(f"シートが見つかりません: {sheet_name}")
-        ws = wb[sheet_name]
-        ws.print_area = cell_range
+        if entry.get("com"):
+            ws = self._com_sheet(entry, sheet_name)
+            self._print_settings(entry, sheet_name)["area"] = cell_range
+            self._apply_page_settings_com(ws, {"area": cell_range})
+        else:
+            wb = entry["wb"]
+            if sheet_name not in wb.sheetnames:
+                raise KeyError(f"シートが見つかりません: {sheet_name}")
+            wb[sheet_name].print_area = cell_range
+            self._print_settings(entry, sheet_name)["area"] = cell_range
         return f"印刷範囲を設定しました: {sheet_name}!{cell_range}"
+
+    def set_page_layout(
+        self, sheet_name: str, paper_size: str = "A4", orientation: str = "portrait",
+        pages_tall: int = 1, pages_wide: int = 1,
+    ) -> str:
+        """印刷の用紙サイズ・向き・「縦に何枚×横に何枚に収めるか」を設定する。
+        例: A4・縦向き・縦1×横1 / B5・横向き・縦5×横3。印刷範囲(set_print_area)が
+        指定した枚数に収まるよう自動で縮小される(Excelの「拡大縮小印刷」の
+        「次のページ数に合わせて印刷」と同じで、縮小のみ。100%より大きくは
+        拡大されない)。この設定は save_as_pdf のPDF出力にも反映される。
+        paper_size: A3 / A4 / A5 / B4 / B5(JIS) / Letter / Legal
+        orientation: portrait(縦向き)/ landscape(横向き)。"縦"/"横"も可。
+        """
+        paper = _normalize_paper_size(paper_size)
+        orient = _normalize_orientation(orientation)
+        try:
+            tall, wide = int(pages_tall), int(pages_wide)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"枚数は整数で指定してください: 縦{pages_tall} × 横{pages_wide}") from e
+        if not (1 <= tall <= _MAX_FIT_PAGES and 1 <= wide <= _MAX_FIT_PAGES):
+            raise ValueError(f"枚数は1〜{_MAX_FIT_PAGES}で指定してください: 縦{tall} × 横{wide}")
+
+        entry = self._active()
+        settings = {"paper": paper, "orientation": orient, "pages_tall": tall, "pages_wide": wide}
+        if entry.get("com"):
+            ws = self._com_sheet(entry, sheet_name)
+            self._apply_page_settings_com(ws, settings)
+        else:
+            wb = entry["wb"]
+            if sheet_name not in wb.sheetnames:
+                raise KeyError(f"シートが見つかりません: {sheet_name}")
+            ws = wb[sheet_name]
+            ws.page_setup.paperSize = _PAPER_SIZES[paper]
+            ws.page_setup.orientation = orient
+            ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+            ws.page_setup.fitToHeight = tall
+            ws.page_setup.fitToWidth = wide
+        self._print_settings(entry, sheet_name).update(settings)
+        label = "縦向き" if orient == "portrait" else "横向き"
+        return f"ページ設定しました: {sheet_name} {paper}・{label}・縦{tall}枚×横{wide}枚に収める"
+
+    def lookup_range_for_date(
+        self, source_path: str, date: str = "", source_sheet: str = "", default_range: str = "",
+    ) -> str:
+        """「日付 と セル範囲」の対応表を書いた別のファイルから、指定した日付の
+        セル範囲(例: A2:K19)を取り出して返す。store_as で変数に保存して、
+        {{変数名}} として set_print_area 等で使うこともできる。
+
+        source_path: Excel(.xlsx/.xlsm)または テキスト(.txt/.csv)。
+          Excelは先頭シート(source_sheetで指定も可)のA列=日付、B列=範囲。
+          テキストは1行に「日付,範囲」(区切りはカンマ/タブ/空白のいずれか)。
+          見出し行や、日付として読めない行は読み飛ばす。
+          例)  2026/10/20,A2:K19
+               2026/10/21,B5:C80
+        date: 取り出す日付。空欄なら実行した日(今日)。"2026/10/20" "2026-10-20"
+          "2026年10月20日" などで指定できる。
+        default_range: その日付の行が無い場合に使う範囲。空欄ならエラーにする
+          (範囲が決まらないまま誤った範囲を印刷しないため)。
+        同じ日付の行が複数あれば、後ろの行を優先する。
+        """
+        target = _parse_date(date) if str(date).strip() else _dt.date.today()
+        rows = _read_date_range_table(Path(source_path), source_sheet)
+        found = None
+        for row_date, cell_range in rows:
+            if row_date == target:
+                found = cell_range
+        if found is None:
+            if str(default_range).strip():
+                return self._normalize_cell_range(default_range)
+            raise KeyError(
+                f"{target:%Y/%m/%d} の範囲が対応表にありません: {source_path}"
+                f"(表にある日付: {len(rows)}件。既定の範囲を指定すれば、無い日はそれを使えます)"
+            )
+        return self._normalize_cell_range(found)
+
+    def set_print_area_from_file(
+        self, sheet_name: str, source_path: str, date: str = "", source_sheet: str = "",
+        default_range: str = "",
+    ) -> str:
+        """lookup_range_for_date で別ファイルの「日付 と セル範囲」の対応表から
+        指定日(省略時は今日)の範囲を取り出し、そのシートの印刷範囲に設定する。
+        毎日印刷する範囲が変わる場合に、実行日に合わせて自動で切り替えられる。
+        """
+        cell_range = self.lookup_range_for_date(source_path, date, source_sheet, default_range)
+        target = _parse_date(date) if str(date).strip() else _dt.date.today()
+        result = self.set_print_area(sheet_name, cell_range)
+        return f"{target:%Y/%m/%d} の範囲を対応表から取り出しました。{result}"
 
     def save_workbook_as(self, output_path: str) -> str:
         entry = self._active()
@@ -711,17 +963,46 @@ class ExcelHandler:
         logger.info("Excelを上書き保存しました: %s", entry["path"])
         return str(entry["path"])
 
+    def _find_entry_by_path(self, p: Path) -> dict[str, Any] | None:
+        """今開いているブックのうち、ファイルのパスがpと同じもの(複数あれば
+        後から開いたもの)を返す。無ければNone。"""
+        found = None
+        for entry in self._workbooks.values():
+            ep = entry.get("path")
+            if ep is not None and Path(ep).resolve() == p:
+                found = entry
+        return found
+
+    def _apply_saved_print_settings(self, wb, settings_by_sheet: dict[str, dict[str, Any]]) -> None:
+        """set_print_area / set_page_layout で記録済みの設定を、COMで開いた
+        ブックの各シートへ適用する(ディスク上のファイルには保存しない)。"""
+        for sheet, settings in settings_by_sheet.items():
+            try:
+                ws = wb.Sheets(sheet)
+            except Exception:  # noqa: BLE001
+                logger.warning("印刷設定のあるシート '%s' がファイルに無いため、反映をスキップします", sheet)
+                continue
+            self._apply_page_settings_com(ws, settings)
+
     def save_as_pdf(self, path: str, output_path: str, sheet_name: str | None = None) -> str:
-        """あらかじめファイル側で設定済みの印刷範囲・ページ設定のままPDFへ
-        書き出す(**Windows + Excelインストール環境専用**)。
+        """Excelファイルを、印刷範囲・ページ設定を反映してPDFへ書き出す
+        (**Windows + Excelインストール環境専用**)。
         sheet_name を指定しない場合はブック全体(全シート)を書き出す。
-        印刷範囲やページ設定(用紙サイズ・拡大縮小・余白等)は、この関数では
-        一切変更しない。事前にExcel側で設定を済ませておくこと。
-        アクティブブックの状態とは独立して、指定したpathに対して直接動作する。
+
+        反映される印刷設定:
+        - このツールで同じファイルを開いて set_print_area(印刷範囲) /
+          set_page_layout(用紙サイズ・向き・縦横の枚数)/ set_print_area_from_file
+          (日付で切り替わる印刷範囲)を実行していれば、その内容を反映する
+          (ファイルには書き込まず、PDF出力用に開いたExcelへ一時的に適用する)。
+        - ファイル側にもともと設定されている印刷範囲・ページ設定は、上記で
+          指定していない項目についてはそのまま使われる。
+        アクティブブックの状態とは独立して、指定したpathに対して直接動作する
+        (pathは、設定を行ったブックを開いたときと同じファイルを指定すること)。
 
         コンストラクタで visible=True の場合、実際のExcelアプリケーションで
         画面に表示しながら書き出す(結果を目で見て確認できるよう、書き出し後も
         ブックは開いたままにする。閉じるにはclose_workbook/closeを使う)。
+        既に同じファイルを開いている場合は、そのブックをそのまま書き出す。
         visible=False(既定)の場合は従来通り、専用の非表示Excelプロセスで
         開いて書き出し、即座に閉じる。
         """
@@ -731,10 +1012,20 @@ class ExcelHandler:
         out = Path(output_path).resolve()
         out.parent.mkdir(parents=True, exist_ok=True)
 
+        matched = self._find_entry_by_path(p)
+        settings_by_sheet = (matched or {}).get("print_settings", {})
+
         if self.visible:
+            if matched is not None and matched.get("com"):
+                # 既に開いているブックには印刷設定が適用済みなので、そのまま書き出す
+                wb = matched["wb"]
+                target = wb.Sheets(sheet_name) if sheet_name else wb
+                target.ExportAsFixedFormat(0, str(out))  # xlTypePDF = 0
+                logger.info("開いているExcelをPDFに書き出しました: %s -> %s", p, out)
+                return str(out)
             wb = self._get_com_app().Workbooks.Open(str(p))
+            self._apply_saved_print_settings(wb, settings_by_sheet)
             target = wb.Sheets(sheet_name) if sheet_name else wb
-            # xlTypePDF = 0
             target.ExportAsFixedFormat(0, str(out))
             alias = self._unique_alias(p.stem)
             self._workbooks[alias] = {"wb": wb, "path": p, "last_records": [], "com": True}
@@ -752,6 +1043,7 @@ class ExcelHandler:
         try:
             wb = excel.Workbooks.Open(str(p))
             try:
+                self._apply_saved_print_settings(wb, settings_by_sheet)
                 target = wb.Sheets(sheet_name) if sheet_name else wb
                 target.ExportAsFixedFormat(0, str(out))
             finally:

@@ -498,7 +498,7 @@ class MacroRecorder:
             print("  3) 読み込んだデータをCSVに書き出す")
             print("  4) セルに値を書き込む")
             print("  5) 別名で保存する")
-            print("  6) PDFとして保存する(印刷範囲・ページ設定は事前設定済み前提)")
+            print("  6) PDFとして保存する(「14)印刷範囲」「29)ページ設定」の設定が反映される)")
             print("  7) 組み込み済みのVBAマクロを実行する(.xlsm)")
             print("  8) 開いている別のExcelに切り替える(複数ファイルを行き来する)")
             print("  9) セル1つの値を読み込む")
@@ -521,6 +521,7 @@ class MacroRecorder:
             print("  26) 名前を変えずに上書き保存する")
             print("  27) 開いているウィンドウのタイトル一覧を見る(目印探し用)")
             print("  28) 別のウィンドウをアクティブにする(タイトル指定。複数Excel/他アプリの切替に)")
+            print("  29) ページ設定を指定する(用紙サイズ・向き・縦横何枚に収めるか)")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -581,10 +582,12 @@ class MacroRecorder:
                 self._record_desktop_list_titles()
             elif choice == "28":
                 self._record_desktop_activate_window()
+            elif choice == "29":
+                self._record_excel_set_page_layout()
             elif choice == "0":
                 return
             else:
-                print("0〜28のいずれかを入力してください。\n")
+                print("0〜29のいずれかを入力してください。\n")
 
     def _record_excel_create(self) -> None:
         alias = self._ask(
@@ -1256,6 +1259,13 @@ class MacroRecorder:
             print("  → キャンセルしました。\n")
             return
         sheet_test, sheet_param = sheet_result
+        print("  ※ ここで設定した印刷範囲は、同じファイルへの「PDFとして保存する」に反映されます。")
+        print("  印刷範囲の指定方法を選んでください:")
+        print("    1) 範囲を直接指定する(例: A1:H30)")
+        print("    2) 日付と範囲の対応表(別のExcel/txt/csv)から、実行日に合わせて決める")
+        if self._ask("  番号(空Enterで1)> ").strip() == "2":
+            self._record_excel_set_print_area_from_file(sheet_test, sheet_param)
+            return
         range_result = self._ask_sluttable_value("印刷範囲(例: A1:H30)")
         if range_result is None:
             print("  → キャンセルしました。\n")
@@ -1268,6 +1278,91 @@ class MacroRecorder:
             self.steps.append({
                 "handler": "excel", "action": "set_print_area",
                 "params": {"sheet_name": sheet_param, "cell_range": range_param},
+            })
+            print("  → 登録しました。\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+
+    def _record_excel_set_print_area_from_file(self, sheet_test: str, sheet_param: str) -> None:
+        print("  対応表の書き方(Excelは先頭シートのA列=日付、B列=範囲 / txt・csvは1行に「日付,範囲」):")
+        print("    例)  2026/10/20,A2:K19")
+        print("         2026/10/21,B5:C80")
+        src = self._ask_sluttable_value("日付と範囲の対応表(Excel/txt/csv)のパス")
+        if src is None:
+            print("  → キャンセルしました。\n")
+            return
+        src_test, src_param = src
+        source_sheet = ""
+        if Path(src_test).suffix.lower() in (".xlsx", ".xlsm", ".xltx", ".xltm"):
+            source_sheet = self._ask("  対応表のシート名(空Enterで先頭シート): ").strip()
+        date_raw = self._ask(
+            "  対象の日付(空Enterで実行した日=今日。例: 2026/10/20。{{変数}}も可): "
+        ).strip()
+        date_test = date_raw
+        if date_raw and "{{" in date_raw and "}}" in date_raw:
+            try:
+                date_test = str(_substitute(date_raw, self.resolution_context(date_raw)))
+            except (KeyError, ValueError, IndexError):
+                date_test = self._ask("  動作確認用に、実際の日付に置き換えたものを入力してください: ").strip()
+        default_range = self._ask(
+            "  表にその日が無い場合に使う範囲(空Enterならエラーで止める。例: A1:K19): "
+        ).strip()
+
+        try:
+            result = self.excel.set_print_area_from_file(
+                sheet_test, src_test, date=date_test,
+                source_sheet=source_sheet, default_range=default_range,
+            )
+            print(f"  → 実際に設定できました: {result}")
+            self.steps.append({
+                "handler": "excel", "action": "set_print_area_from_file",
+                "params": {
+                    "sheet_name": sheet_param, "source_path": src_param, "date": date_raw,
+                    "source_sheet": source_sheet, "default_range": default_range,
+                },
+            })
+            print("  → 登録しました。\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
+
+    def _record_excel_set_page_layout(self) -> None:
+        print("  ※ 用紙サイズ・向き・「縦に何枚×横に何枚に収めるか」を設定します。印刷範囲が")
+        print("     指定した枚数に収まるよう自動で縮小されます(縮小のみ。拡大はされません)。")
+        print("     設定は、同じファイルへの「PDFとして保存する」に反映されます。")
+        sheet_result = self._ask_sluttable_value("対象シート名")
+        if sheet_result is None:
+            print("  → キャンセルしました。\n")
+            return
+        sheet_test, sheet_param = sheet_result
+
+        papers = ["A3", "A4", "A5", "B4", "B5", "Letter", "Legal"]
+        print("  用紙サイズを選んでください:")
+        for i, name in enumerate(papers, start=1):
+            print(f"    {i}) {name}{'(既定)' if name == 'A4' else ''}")
+        choice = self._ask("  番号(空Enterで2=A4)> ").strip()
+        paper = papers[int(choice) - 1] if choice.isdigit() and 1 <= int(choice) <= len(papers) else "A4"
+        print("  向きを選んでください:")
+        print("    1) 縦向き(既定)")
+        print("    2) 横向き")
+        orientation = "landscape" if self._ask("  番号(空Enterで1)> ").strip() == "2" else "portrait"
+        try:
+            tall = int(self._ask("  縦に何枚に収めますか?(空Enterで1): ").strip() or "1")
+            wide = int(self._ask("  横に何枚に収めますか?(空Enterで1): ").strip() or "1")
+        except ValueError:
+            print("  枚数は整数で入力してください。この手順は登録しませんでした。\n")
+            return
+
+        try:
+            result = self.excel.set_page_layout(
+                sheet_test, paper_size=paper, orientation=orientation, pages_tall=tall, pages_wide=wide,
+            )
+            print(f"  → 実際に設定できました: {result}")
+            self.steps.append({
+                "handler": "excel", "action": "set_page_layout",
+                "params": {
+                    "sheet_name": sheet_param, "paper_size": paper, "orientation": orientation,
+                    "pages_tall": tall, "pages_wide": wide,
+                },
             })
             print("  → 登録しました。\n")
         except Exception as e:  # noqa: BLE001
@@ -1462,6 +1557,7 @@ class MacroRecorder:
             print("  10) 埋め込み画像を抽出する")
             print("  11) 開いているウィンドウのタイトル一覧を見る(目印探し用)")
             print("  12) 別のウィンドウをアクティブにする(タイトル指定。PDFビューア等の切替に)")
+            print("  13) PDF(複数ページ可)を画像1枚(PNG/JPEG等)に変換して保存する")
             print("  0) 戻る")
             choice = self._ask("番号> ")
             print()
@@ -1490,10 +1586,63 @@ class MacroRecorder:
                 self._record_desktop_list_titles()
             elif choice == "12":
                 self._record_desktop_activate_window()
+            elif choice == "13":
+                self._record_pdf_to_image()
             elif choice == "0":
                 return
             else:
-                print("0〜12のいずれかを入力してください。\n")
+                print("0〜13のいずれかを入力してください。\n")
+
+    def _record_pdf_to_image(self) -> None:
+        print("  ※ PDF(複数ページでも可)を、画像1枚に変換して保存します。複数ページは")
+        print("     ページ順に1枚へ連結します。出力ファイルの拡張子で形式が決まります")
+        print("     (.png / .jpg / .jpeg / .bmp / .tif / .tiff / .webp)。")
+        r1 = self._ask_sluttable_value("変換するPDFのパス")
+        if r1 is None:
+            print("  → キャンセルしました。\n")
+            return
+        in_test, in_param = r1
+        r2 = self._ask_sluttable_value("出力する画像のパス(例: C:\\out\\result.png)")
+        if r2 is None:
+            print("  → キャンセルしました。\n")
+            return
+        out_test, out_param = r2
+
+        dpi_raw = self._ask("  解像度dpi(30〜600。空Enterで150): ").strip()
+        try:
+            dpi = int(dpi_raw) if dpi_raw else 150
+        except ValueError:
+            print("  数字で入力してください。この手順は登録しませんでした。\n")
+            return
+        print("  複数ページの並べ方を選んでください:")
+        print("    1) 縦に連結(既定)")
+        print("    2) 横に連結")
+        direction = "horizontal" if self._ask("  番号(空Enterで1)> ").strip() == "2" else "vertical"
+        start_raw = self._ask("  開始ページ(空Enterで最初から): ").strip()
+        end_raw = self._ask("  終了ページ(空Enterで最後まで): ").strip()
+        try:
+            start_page = int(start_raw) if start_raw else None
+            end_page = int(end_raw) if end_raw else None
+        except ValueError:
+            print("  ページ番号は数字で入力してください。この手順は登録しませんでした。\n")
+            return
+
+        try:
+            result = self.pdf.pdf_to_image(
+                in_test, out_test, dpi=dpi, direction=direction,
+                start_page=start_page, end_page=end_page,
+            )
+            print(f"  → 実際に画像1枚へ変換できました: {result}")
+            self.steps.append({
+                "handler": "pdf", "action": "pdf_to_image",
+                "params": {
+                    "input_path": in_param, "output_path": out_param, "dpi": dpi,
+                    "direction": direction, "start_page": start_page, "end_page": end_page,
+                },
+            })
+            print("  → 登録しました。\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {e}\n")
 
     def _record_pdf_get_page_count(self) -> None:
         r1 = self._ask_sluttable_value("対象PDFのパス")

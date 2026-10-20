@@ -144,7 +144,8 @@ DOMAIN_ACTIONS = {
         "別名で保存する", "名前を変えずに上書き保存する", "PDFとして保存する", "VBAマクロを実行する",
         "開いている別のExcelに切り替える", "セル1つの値を読み込む", "最終行を取得する",
         "セルをコピーして貼り付ける", "シートをコピーする", "シート名の一覧を取得する",
-        "印刷範囲を指定する", "新規シートを追加する", "シート名を変更する",
+        "印刷範囲を指定する", "ページ設定を指定する(用紙・向き・枚数)",
+        "新規シートを追加する", "シート名を変更する",
         "セル範囲(1列/1行)をリストとして取得する",
         "値でセルを検索する", "表の末尾に1行追記する", "行を挿入する", "行を削除する",
         "セル範囲の値を空にする", "シートを削除する", "最終列を取得する",
@@ -155,6 +156,7 @@ DOMAIN_ACTIONS = {
         "PDFを回転する", "OCRでテキスト化する(ページ全体)",
         "範囲を指定してテキストを取得する", "ページ範囲を1ファイルに抜き出す",
         "ページ数を取得する", "表(罫線あり)をCSVとして抽出する", "埋め込み画像を抽出する",
+        "PDFを画像1枚に変換する",
         "開いているウィンドウのタイトル一覧を見る", "ウィンドウをアクティブにする",
     ],
     "web": [
@@ -2487,8 +2489,12 @@ class RecorderApp(_AppBase):
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
         elif action == "PDFとして保存する":
-            ttk.Label(f, text="※ Windows + Excel + pywin32 が必要です。印刷範囲・ページ設定は変更しません。",
-                      foreground="#a55").pack(anchor="w", pady=(0, 4))
+            ttk.Label(
+                f, text="※ Windows + Excel + pywin32 が必要です。同じファイルについて「印刷範囲を指定する」"
+                "「ページ設定を指定する」で設定した内容(範囲・用紙・向き・枚数)は、このPDFに反映されます"
+                "(元のExcelファイル自体は書き換えません)。",
+                foreground="#a55", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
             path_field = ValueSlotField(f, "元のExcelファイルのパス")
             path_field.add_button("参照...", path_field.browse_file)
             path_field.pack(fill="x", pady=4)
@@ -2838,20 +2844,174 @@ class RecorderApp(_AppBase):
             ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
 
         elif action == "印刷範囲を指定する":
+            ttk.Label(
+                f, text="印刷範囲を設定します。この設定は、同じファイルに対する「PDFとして保存する」の"
+                "PDF出力に反映されます。範囲は直接指定するか、日付ごとの範囲を書いた別ファイルから"
+                "実行日に合わせて自動で切り替えられます。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
             sheet_field = ValueSlotField(f, "対象シート名")
             sheet_field.pack(fill="x", pady=4)
-            range_field = ValueSlotField(f, "印刷範囲(例: A1:H30)")
+
+            mode_var = tk.StringVar(value="direct")
+            mode_row = ttk.Frame(f)
+            mode_row.pack(anchor="w", pady=(4, 2))
+            ttk.Radiobutton(mode_row, text="範囲を直接指定", variable=mode_var, value="direct").pack(
+                side="left", padx=(0, 10))
+            ttk.Radiobutton(
+                mode_row, text="日付と範囲の対応表(別ファイル)から実行日に合わせて決める",
+                variable=mode_var, value="file",
+            ).pack(side="left")
+
+            direct_frame = ttk.Frame(f)
+            range_field = ValueSlotField(direct_frame, "印刷範囲(例: A1:H30)")
             range_field.pack(fill="x", pady=4)
+
+            file_frame = ttk.Frame(f)
+            ttk.Label(
+                file_frame, text="対応表の書き方(Excelは先頭シートのA列=日付、B列=範囲 / "
+                "txt・csvは1行に「日付,範囲」。区切りはカンマ・タブ・空白のどれでも可)\n"
+                "  例)  2026/10/20,A2:K19\n"
+                "       2026/10/21,B5:C80\n"
+                "見出し行や日付として読めない行は読み飛ばします。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
+            src_field = ValueSlotField(file_frame, "日付と範囲の対応表(Excel/txt/csv)のパス")
+            src_field.add_button("参照...", src_field.browse_file)
+            src_field.pack(fill="x", pady=4)
+            src_sheet_field = PlainField(file_frame, "(Excelの対応表の場合)シート名(空欄で先頭シート)", width=20)
+            src_sheet_field.pack(fill="x", pady=2)
+            date_field = PlainField(
+                file_frame, "対象の日付(空欄で実行した日=今日。例: 2026/10/20 や {{変数}})", width=20,
+            )
+            date_field.pack(fill="x", pady=2)
+            default_field = PlainField(
+                file_frame, "表にその日が無い場合に使う範囲(空欄ならエラーで止める。例: A1:K19)", width=20,
+            )
+            default_field.pack(fill="x", pady=2)
+
+            def refresh_mode(*_args):
+                direct_frame.pack_forget()
+                file_frame.pack_forget()
+                (direct_frame if mode_var.get() == "direct" else file_frame).pack(fill="x")
+
+            mode_var.trace_add("write", refresh_mode)
+            refresh_mode()
 
             def on_submit():
                 sheet_test, sheet_param, _ = sheet_field.get()
-                range_test, range_param, _ = range_field.get()
+                if mode_var.get() == "direct":
+                    range_test, range_param, _ = range_field.get()
+                    try:
+                        result = self.recorder.excel.set_print_area(sheet_test, range_test)
+                        self.log(f"→ {result}")
+                        self.register_step({
+                            "handler": "excel", "action": "set_print_area",
+                            "params": {"sheet_name": sheet_param, "cell_range": range_param},
+                        })
+                    except Exception as e:  # noqa: BLE001
+                        self.log(f"⚠ {e}")
+                    return
+
+                src_test, src_param, _ = src_field.get()
+                if not src_test:
+                    self.log("⚠ 日付と範囲の対応表のファイルを指定してください")
+                    return
+                date_raw = date_field.get().strip()
+                date_test = self._resolve_test_value(date_raw)
+                if date_test is None:
+                    self.log("→ 動作確認用の日付が入力されなかったため、登録を中止しました")
+                    return
+                source_sheet = src_sheet_field.get().strip()
+                default_range = default_field.get().strip()
                 try:
-                    result = self.recorder.excel.set_print_area(sheet_test, range_test)
+                    result = self.recorder.excel.set_print_area_from_file(
+                        sheet_test, src_test, date=str(date_test),
+                        source_sheet=source_sheet, default_range=default_range,
+                    )
                     self.log(f"→ {result}")
                     self.register_step({
-                        "handler": "excel", "action": "set_print_area",
-                        "params": {"sheet_name": sheet_param, "cell_range": range_param},
+                        "handler": "excel", "action": "set_print_area_from_file",
+                        "params": {
+                            "sheet_name": sheet_param, "source_path": src_param, "date": date_raw,
+                            "source_sheet": source_sheet, "default_range": default_range,
+                        },
+                    })
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "ページ設定を指定する(用紙・向き・枚数)":
+            ttk.Label(
+                f, text="用紙サイズ・向き・「縦に何枚×横に何枚に収めるか」を設定します。印刷範囲が"
+                "指定した枚数に収まるよう自動で縮小されます(縮小のみで、100%より大きくは拡大されません)。"
+                "この設定は、同じファイルに対する「PDFとして保存する」のPDF出力に反映されます。"
+                "例)A4縦向きで縦1×横1 / B5横向きで縦5×横3",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
+            sheet_field = ValueSlotField(f, "対象シート名")
+            sheet_field.pack(fill="x", pady=4)
+
+            paper_row = ttk.Frame(f)
+            paper_row.pack(anchor="w", pady=4)
+            ttk.Label(paper_row, text="用紙サイズ").pack(side="left", padx=(0, 6))
+            paper_combo = ttk.Combobox(
+                paper_row, state="readonly", width=10,
+                values=["A3", "A4", "A5", "B4", "B5", "Letter", "Legal"],
+            )
+            paper_combo.set("A4")
+            paper_combo.pack(side="left")
+
+            orient_var = tk.StringVar(value="portrait")
+            orient_row = ttk.Frame(f)
+            orient_row.pack(anchor="w", pady=2)
+            ttk.Label(orient_row, text="向き").pack(side="left", padx=(0, 6))
+            ttk.Radiobutton(orient_row, text="縦向き", variable=orient_var, value="portrait").pack(
+                side="left", padx=(0, 10))
+            ttk.Radiobutton(orient_row, text="横向き", variable=orient_var, value="landscape").pack(side="left")
+
+            tall_field = PlainField(f, "縦に何枚に収めるか", default="1", width=8)
+            tall_field.pack(fill="x", pady=2)
+            wide_field = PlainField(f, "横に何枚に収めるか", default="1", width=8)
+            wide_field.pack(fill="x", pady=2)
+
+            summary_var = tk.StringVar()
+            ttk.Label(f, textvariable=summary_var, foreground="#25a").pack(anchor="w", pady=(4, 2))
+
+            def refresh_summary(*_args):
+                label = "縦向き" if orient_var.get() == "portrait" else "横向き"
+                summary_var.set(
+                    f"→ {paper_combo.get()}サイズ・{label}で、縦{tall_field.get() or '?'}枚 × "
+                    f"横{wide_field.get() or '?'}枚に収まるよう調整します"
+                )
+
+            for var in (orient_var, tall_field.var, wide_field.var):
+                var.trace_add("write", refresh_summary)
+            paper_combo.bind("<<ComboboxSelected>>", refresh_summary)
+            refresh_summary()
+
+            def on_submit():
+                sheet_test, sheet_param, _ = sheet_field.get()
+                try:
+                    tall = int(tall_field.get().strip() or "1")
+                    wide = int(wide_field.get().strip() or "1")
+                except ValueError:
+                    self.log("⚠ 枚数は整数で入力してください")
+                    return
+                paper, orientation = paper_combo.get(), orient_var.get()
+                try:
+                    result = self.recorder.excel.set_page_layout(
+                        sheet_test, paper_size=paper, orientation=orientation,
+                        pages_tall=tall, pages_wide=wide,
+                    )
+                    self.log(f"→ {result}")
+                    self.register_step({
+                        "handler": "excel", "action": "set_page_layout",
+                        "params": {
+                            "sheet_name": sheet_param, "paper_size": paper, "orientation": orientation,
+                            "pages_tall": tall, "pages_wide": wide,
+                        },
                     })
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
@@ -3417,6 +3577,68 @@ class RecorderApp(_AppBase):
                     if store_as:
                         step["store_as"] = store_as
                     self.register_step(step, count)
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"⚠ {e}")
+
+            ttk.Button(f, text="動作確認して登録", command=on_submit).pack(pady=6)
+
+        elif action == "PDFを画像1枚に変換する":
+            ttk.Label(
+                f, text="PDF(複数ページでも可)を、PNG・JPEGなどの画像ファイル1枚に変換して保存します。"
+                "複数ページはページ順に1枚へ連結します。出力ファイルの拡張子(.png / .jpg / .bmp / "
+                ".tif / .webp)で形式が決まります。",
+                foreground="#557", wraplength=420, justify="left",
+            ).pack(anchor="w", pady=(0, 4))
+            in_field = ValueSlotField(f, "変換するPDFのパス")
+            in_field.add_button("参照...", in_field.browse_file)
+            in_field.pack(fill="x", pady=4)
+            out_field = ValueSlotField(f, "出力する画像のパス(例: C:\\out\\result.png)")
+            out_field.add_button("参照...", lambda: out_field.browse_save_file(".png"))
+            out_field.pack(fill="x", pady=4)
+            dpi_field = PlainField(f, "解像度dpi(30〜600。大きいほど鮮明だが画像も巨大に)", default="150", width=8)
+            dpi_field.pack(fill="x", pady=2)
+            dir_var = tk.StringVar(value="vertical")
+            dir_row = ttk.Frame(f)
+            dir_row.pack(anchor="w", pady=2)
+            ttk.Label(dir_row, text="複数ページの並べ方").pack(side="left", padx=(0, 6))
+            ttk.Radiobutton(dir_row, text="縦に連結", variable=dir_var, value="vertical").pack(
+                side="left", padx=(0, 10))
+            ttk.Radiobutton(dir_row, text="横に連結", variable=dir_var, value="horizontal").pack(side="left")
+            start_field = PlainField(f, "開始ページ(空欄で最初から)", width=8)
+            start_field.pack(fill="x", pady=2)
+            end_field = PlainField(f, "終了ページ(空欄で最後まで)", width=8)
+            end_field.pack(fill="x", pady=2)
+
+            def on_submit():
+                in_test, in_param, _ = in_field.get()
+                out_test, out_param, _ = out_field.get()
+                try:
+                    dpi = int(dpi_field.get().strip() or "150")
+                    start_raw, end_raw = start_field.get().strip(), end_field.get().strip()
+                    start_page = int(start_raw) if start_raw else None
+                    end_page = int(end_raw) if end_raw else None
+                except ValueError:
+                    self.log("⚠ dpiとページ番号は整数で入力してください")
+                    return
+                direction = dir_var.get()
+                step = {
+                    "handler": "pdf", "action": "pdf_to_image",
+                    "params": {
+                        "input_path": in_param, "output_path": out_param, "dpi": dpi,
+                        "direction": direction, "start_page": start_page, "end_page": end_page,
+                    },
+                }
+                if self._has_template(in_test) or self._has_template(out_test):
+                    self.log("→ 変数参照が含まれるため動作確認をスキップして登録します")
+                    self.register_step(step)
+                    return
+                try:
+                    result = self.recorder.pdf.pdf_to_image(
+                        in_test, out_test, dpi=dpi, direction=direction,
+                        start_page=start_page, end_page=end_page,
+                    )
+                    self.log(f"→ 画像1枚に変換できました: {result}")
+                    self.register_step(step)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"⚠ {e}")
 
