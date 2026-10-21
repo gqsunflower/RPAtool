@@ -1702,11 +1702,17 @@ class MacroRecorder:
         except ValueError:
             print("  ページ番号は数字で入力してください。この手順は登録しませんでした。\n")
             return
+        extra: dict[str, bool] = {}
+        if Path(out_test).suffix.lower() in (".png", ".webp", ".tif", ".tiff"):
+            if self._ask(
+                "  下地を透明にしますか?(Excelの塗りなしの部分が透明になります) (y/N): "
+            ).strip().lower() == "y":
+                extra["transparent_background"] = True
 
         try:
             result = self.pdf.pdf_to_image(
                 in_test, out_test, dpi=dpi, direction=direction,
-                start_page=start_page, end_page=end_page,
+                start_page=start_page, end_page=end_page, **extra,
             )
             print(f"  → 実際に画像1枚へ変換できました: {result}")
             self.steps.append({
@@ -1714,6 +1720,7 @@ class MacroRecorder:
                 "params": {
                     "input_path": in_param, "output_path": out_param, "dpi": dpi,
                     "direction": direction, "start_page": start_page, "end_page": end_page,
+                    **extra,
                 },
             })
             print("  → 登録しました。\n")

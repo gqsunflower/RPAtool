@@ -3751,6 +3751,10 @@ class RecorderApp(_AppBase):
             start_field.pack(fill="x", pady=2)
             end_field = PlainField(f, "終了ページ(空欄で最後まで)", width=8)
             end_field.pack(fill="x", pady=2)
+            transparent_field = BoolField(
+                f, "下地を透明にする(Excelの塗りなしの部分が透明になる。PNG / WEBP / TIFF のみ。JPEG・BMPは不可)",
+            )
+            transparent_field.pack(anchor="w", pady=(4, 2))
 
             def on_submit():
                 in_test, in_param, _ = in_field.get()
@@ -3764,11 +3768,13 @@ class RecorderApp(_AppBase):
                     self.log("⚠ dpiとページ番号は整数で入力してください")
                     return
                 direction = dir_var.get()
+                extra = {"transparent_background": True} if transparent_field.get() else {}
                 step = {
                     "handler": "pdf", "action": "pdf_to_image",
                     "params": {
                         "input_path": in_param, "output_path": out_param, "dpi": dpi,
                         "direction": direction, "start_page": start_page, "end_page": end_page,
+                        **extra,
                     },
                 }
                 if self._has_template(in_test) or self._has_template(out_test):
@@ -3778,7 +3784,7 @@ class RecorderApp(_AppBase):
                 try:
                     result = self.recorder.pdf.pdf_to_image(
                         in_test, out_test, dpi=dpi, direction=direction,
-                        start_page=start_page, end_page=end_page,
+                        start_page=start_page, end_page=end_page, **extra,
                     )
                     self.log(f"→ 画像1枚に変換できました: {result}")
                     self.register_step(step)

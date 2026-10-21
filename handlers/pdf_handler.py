@@ -226,15 +226,21 @@ class PdfHandler:
     }
     _MAX_IMAGE_PIXELS = 300_000_000  # 連結後の画像が巨大すぎてメモリを使い切るのを防ぐ
     _JPEG_MAX_SIDE = 65500  # JPEG形式の仕様上の上限(1辺の長さ)
+    _ALPHA_FORMATS = {"PNG", "WEBP", "TIFF"}  # 透明(アルファ)を扱える形式
 
     def pdf_to_image(
         self, input_path: str, output_path: str, dpi: int = 150,
         direction: str = "vertical", start_page: int | None = None, end_page: int | None = None,
+        transparent_background: bool = False,
     ) -> str:
         """PDF(複数ページでも可)を、画像ファイル1枚に変換して保存する。
         複数ページは、ページ順に1枚の画像へ連結する(direction="vertical"で
         縦に並べる/"horizontal"で横に並べる。幅や高さがページごとに違う場合は、
-        足りない部分を白で埋める)。
+        足りない部分を白(下地を透明にした場合は透明)で埋める)。
+        transparent_background=True にすると、白い下地を敷かずに描画する。
+        PDFでは「塗りなし」のセルは何も描かれないため、その部分が透明になる
+        (白で塗りつぶしたセルや、色付きのセル・文字はそのまま)。透明を持てる
+        PNG / WEBP / TIFF のときだけ指定できる(JPEG・BMPはエラー)。
         output_path の拡張子で形式が決まる(.png / .jpg / .jpeg / .bmp / .tif /
         .tiff / .webp)。dpiは解像度(既定150。大きいほど鮮明だが画像が巨大に
         なる)。start_page/end_pageで一部のページだけ(1始まり・両端含む)にもできる
@@ -250,6 +256,12 @@ class PdfHandler:
             raise ValueError(
                 f"画像の形式を判別できません: '{out.suffix}'"
                 f"(出力ファイル名の拡張子は {' / '.join(self._IMAGE_FORMATS)} のいずれかにしてください)"
+            )
+        transparent = bool(transparent_background)
+        if transparent and fmt not in self._ALPHA_FORMATS:
+            raise ValueError(
+                f"下地を透明にできるのは {' / '.join(sorted(self._ALPHA_FORMATS))} 形式だけです"
+                f"('{out.suffix}' は透明を扱えません)。出力ファイルの拡張子を .png などにしてください。"
             )
         direction_key = str(direction).strip().lower()
         if direction_key in ("縦", "縦に連結", "vertical"):
@@ -267,16 +279,32 @@ class PdfHandler:
 
         from PIL import Image
 
-        with pdfplumber.open(str(p)) as pdf:
-            total = len(pdf.pages)
+        def page_range(total: int) -> tuple[int, int]:
             first = 1 if start_page is None else int(start_page)
             last = total if end_page is None else int(end_page)
             if first < 1 or last > total or first > last:
                 raise ValueError(f"ページ範囲が不正です(全{total}ページ): {first}〜{last}")
-            pages = [
-                pdf.pages[i].to_image(resolution=dpi).original.convert("RGB")
-                for i in range(first - 1, last)
-            ]
+            return first, last
+
+        if transparent:
+            import pypdfium2 as pdfium
+
+            doc = pdfium.PdfDocument(str(p))
+            try:
+                first, last = page_range(len(doc))
+                pages = [
+                    doc[i].render(scale=dpi / 72, fill_color=(255, 255, 255, 0)).to_pil().convert("RGBA")
+                    for i in range(first - 1, last)
+                ]
+            finally:
+                doc.close()
+        else:
+            with pdfplumber.open(str(p)) as pdf:
+                first, last = page_range(len(pdf.pages))
+                pages = [
+                    pdf.pages[i].to_image(resolution=dpi).original.convert("RGB")
+                    for i in range(first - 1, last)
+                ]
 
         if direction_key == "vertical":
             width, height = max(im.width for im in pages), sum(im.height for im in pages)
@@ -293,7 +321,10 @@ class PdfHandler:
                 "PNG形式にするか、dpiを下げる/ページ範囲を絞ってください。"
             )
 
-        canvas = Image.new("RGB", (width, height), "white")
+        canvas = (
+            Image.new("RGBA", (width, height), (255, 255, 255, 0)) if transparent
+            else Image.new("RGB", (width, height), "white")
+        )
         offset = 0
         for im in pages:
             if direction_key == "vertical":
@@ -306,8 +337,8 @@ class PdfHandler:
         out.parent.mkdir(parents=True, exist_ok=True)
         save_kwargs = {"quality": 95} if fmt in ("JPEG", "WEBP") else {}
         canvas.save(out, format=fmt, **save_kwargs)
-        logger.info("PDFを画像1枚に変換しました(%dページ, %dx%d, dpi=%d): %s -> %s",
-                    len(pages), width, height, dpi, p, out)
+        logger.info("PDFを画像1枚に変換しました(%dページ, %dx%d, dpi=%d, 透明下地=%s): %s -> %s",
+                    len(pages), width, height, dpi, transparent, p, out)
         return str(out)
 
     def rotate_pdf(
