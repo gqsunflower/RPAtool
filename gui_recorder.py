@@ -3039,7 +3039,7 @@ class RecorderApp(_AppBase):
 
         elif action == "ページ設定を指定する(用紙・向き・枚数)":
             ttk.Label(
-                f, text="用紙サイズ・向き・「縦に何枚×横に何枚に収めるか」を設定します。印刷範囲が"
+                f, text="用紙サイズ・向き・「縦に何枚×横に何枚に収めるか」・余白を設定します。印刷範囲が"
                 "指定した枚数に収まるよう自動で縮小されます(縮小のみで、100%より大きくは拡大されません)。"
                 "この設定は、同じファイルに対する「PDFとして保存する」のPDF出力に反映されます。"
                 "例)A4縦向きで縦1×横1 / B5横向きで縦5×横3",
@@ -3071,19 +3071,57 @@ class RecorderApp(_AppBase):
             wide_field = PlainField(f, "横に何枚に収めるか", default="1", width=8)
             wide_field.pack(fill="x", pady=2)
 
+            ttk.Label(
+                f, text="余白(cm。小数可。空欄にした辺は、今の余白のまま変更しません)",
+            ).pack(anchor="w", pady=(8, 2))
+            margin_presets = {
+                "(選ばない)": None,
+                "標準(上下1.9・左右1.8)": (1.9, 1.9, 1.8, 1.8),
+                "狭い(上下1.9・左右0.6)": (1.9, 1.9, 0.6, 0.6),
+                "広い(上下2.5・左右2.5)": (2.5, 2.5, 2.5, 2.5),
+                "なし(すべて0)": (0, 0, 0, 0),
+            }
+            preset_row = ttk.Frame(f)
+            preset_row.pack(anchor="w", pady=2)
+            ttk.Label(preset_row, text="よく使う余白").pack(side="left", padx=(0, 6))
+            preset_combo = ttk.Combobox(
+                preset_row, state="readonly", width=24, values=list(margin_presets),
+            )
+            preset_combo.set("(選ばない)")
+            preset_combo.pack(side="left")
+            margin_vars = {key: tk.StringVar() for key in ("top", "bottom", "left", "right")}
+            margin_row = ttk.Frame(f)
+            margin_row.pack(anchor="w", pady=2)
+            for key, label in (("top", "上"), ("bottom", "下"), ("left", "左"), ("right", "右")):
+                ttk.Label(margin_row, text=label).pack(side="left", padx=(0, 2))
+                ttk.Entry(margin_row, textvariable=margin_vars[key], width=6).pack(side="left", padx=(0, 10))
+
+            def apply_preset(_event=None):
+                values = margin_presets.get(preset_combo.get())
+                if values is None:
+                    return
+                for key, value in zip(("top", "bottom", "left", "right"), values):
+                    margin_vars[key].set(f"{value:g}")
+
+            preset_combo.bind("<<ComboboxSelected>>", apply_preset)
+
             summary_var = tk.StringVar()
-            ttk.Label(f, textvariable=summary_var, foreground="#25a").pack(anchor="w", pady=(4, 2))
+            ttk.Label(f, textvariable=summary_var, foreground="#25a", wraplength=420, justify="left").pack(
+                anchor="w", pady=(4, 2))
 
             def refresh_summary(*_args):
                 label = "縦向き" if orient_var.get() == "portrait" else "横向き"
+                names = (("top", "上"), ("bottom", "下"), ("left", "左"), ("right", "右"))
+                given = [f"{n}{margin_vars[k].get().strip()}cm" for k, n in names if margin_vars[k].get().strip()]
+                margin_text = f"、余白 {' '.join(given)}" if given else ""
                 summary_var.set(
                     f"→ {paper_combo.get()}サイズ・{label}で、縦{tall_field.get() or '?'}枚 × "
-                    f"横{wide_field.get() or '?'}枚に収まるよう調整します"
+                    f"横{wide_field.get() or '?'}枚に収まるよう調整します{margin_text}"
                 )
 
-            for var in (orient_var, tall_field.var, wide_field.var):
+            for var in (orient_var, tall_field.var, wide_field.var, *margin_vars.values()):
                 var.trace_add("write", refresh_summary)
-            paper_combo.bind("<<ComboboxSelected>>", refresh_summary)
+            paper_combo.bind("<<ComboboxSelected>>", refresh_summary, add="+")
             refresh_summary()
 
             def on_submit():
@@ -3094,18 +3132,28 @@ class RecorderApp(_AppBase):
                 except ValueError:
                     self.log("⚠ 枚数は整数で入力してください")
                     return
+                margin_params: dict[str, float] = {}
+                for key, label in (("top", "上"), ("bottom", "下"), ("left", "左"), ("right", "右")):
+                    raw = margin_vars[key].get().strip()
+                    if not raw:
+                        continue
+                    try:
+                        margin_params[f"margin_{key}"] = float(raw)
+                    except ValueError:
+                        self.log(f"⚠ {label}の余白は数字(cm)で入力してください")
+                        return
                 paper, orientation = paper_combo.get(), orient_var.get()
                 try:
                     result = self.recorder.excel.set_page_layout(
                         sheet_test, paper_size=paper, orientation=orientation,
-                        pages_tall=tall, pages_wide=wide,
+                        pages_tall=tall, pages_wide=wide, **margin_params,
                     )
                     self.log(f"→ {result}")
                     self.register_step({
                         "handler": "excel", "action": "set_page_layout",
                         "params": {
                             "sheet_name": sheet_param, "paper_size": paper, "orientation": orientation,
-                            "pages_tall": tall, "pages_wide": wide,
+                            "pages_tall": tall, "pages_wide": wide, **margin_params,
                         },
                     })
                 except Exception as e:  # noqa: BLE001

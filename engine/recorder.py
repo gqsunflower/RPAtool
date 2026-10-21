@@ -1388,7 +1388,7 @@ class MacroRecorder:
             print(f"  ⚠ {e}\n")
 
     def _record_excel_set_page_layout(self) -> None:
-        print("  ※ 用紙サイズ・向き・「縦に何枚×横に何枚に収めるか」を設定します。印刷範囲が")
+        print("  ※ 用紙サイズ・向き・「縦に何枚×横に何枚に収めるか」・余白を設定します。印刷範囲が")
         print("     指定した枚数に収まるよう自動で縮小されます(縮小のみ。拡大はされません)。")
         print("     設定は、同じファイルへの「PDFとして保存する」に反映されます。")
         sheet_result = self._ask_sluttable_value("対象シート名")
@@ -1414,16 +1414,30 @@ class MacroRecorder:
             print("  枚数は整数で入力してください。この手順は登録しませんでした。\n")
             return
 
+        print("  余白をcmで指定します(小数可。変更しない辺は空Enter。Excelの標準は上下1.9・左右1.8、")
+        print("  「狭い」は上下1.9・左右0.6):")
+        margin_params: dict[str, float] = {}
+        for key, label in (("top", "上"), ("bottom", "下"), ("left", "左"), ("right", "右")):
+            raw = self._ask(f"  {label}の余白(cm): ").strip()
+            if not raw:
+                continue
+            try:
+                margin_params[f"margin_{key}"] = float(raw)
+            except ValueError:
+                print(f"  {label}の余白は数字で入力してください。この手順は登録しませんでした。\n")
+                return
+
         try:
             result = self.excel.set_page_layout(
                 sheet_test, paper_size=paper, orientation=orientation, pages_tall=tall, pages_wide=wide,
+                **margin_params,
             )
             print(f"  → 実際に設定できました: {result}")
             self.steps.append({
                 "handler": "excel", "action": "set_page_layout",
                 "params": {
                     "sheet_name": sheet_param, "paper_size": paper, "orientation": orientation,
-                    "pages_tall": tall, "pages_wide": wide,
+                    "pages_tall": tall, "pages_wide": wide, **margin_params,
                 },
             })
             print("  → 登録しました。\n")

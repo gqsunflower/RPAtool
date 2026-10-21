@@ -98,6 +98,19 @@ def _normalize_paper_size(paper_size: str) -> str:
     return key
 
 
+def _parse_margin(label: str, value: Any) -> float | None:
+    """余白(cm)を数値にする。None/空欄は「変更しない」としてNone。"""
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        cm = float(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{label}の余白は数字(cm)で指定してください: {value}") from e
+    if not (0 <= cm <= 50):
+        raise ValueError(f"{label}の余白は0〜50cmで指定してください: {value}")
+    return cm
+
+
 def _normalize_orientation(orientation: str) -> str:
     key = str(orientation).strip().lower()
     if key in ("portrait", "縦", "縦向き", "たて"):
@@ -949,6 +962,10 @@ class ExcelHandler:
                 ps.Orientation = _XL_ORIENTATION[settings["orientation"]]
             if "paper" in settings:
                 ps.PaperSize = _PAPER_SIZES[settings["paper"]]
+            for key, attr in (("top", "TopMargin"), ("bottom", "BottomMargin"),
+                              ("left", "LeftMargin"), ("right", "RightMargin")):
+                if key in settings.get("margins", {}):
+                    setattr(ps, attr, settings["margins"][key] / 2.54 * 72)  # cm → ポイント
             if "area" in settings:
                 ps.PrintArea = settings["area"]
             if "title_cols" in settings:
@@ -987,14 +1004,20 @@ class ExcelHandler:
     def set_page_layout(
         self, sheet_name: str, paper_size: str = "A4", orientation: str = "portrait",
         pages_tall: int = 1, pages_wide: int = 1,
+        margin_top: float | None = None, margin_bottom: float | None = None,
+        margin_left: float | None = None, margin_right: float | None = None,
     ) -> str:
-        """印刷の用紙サイズ・向き・「縦に何枚×横に何枚に収めるか」を設定する。
+        """印刷の用紙サイズ・向き・「縦に何枚×横に何枚に収めるか」・余白を設定する。
         例: A4・縦向き・縦1×横1 / B5・横向き・縦5×横3。印刷範囲(set_print_area)が
         指定した枚数に収まるよう自動で縮小される(Excelの「拡大縮小印刷」の
         「次のページ数に合わせて印刷」と同じで、縮小のみ。100%より大きくは
         拡大されない)。この設定は save_as_pdf のPDF出力にも反映される。
         paper_size: A3 / A4 / A5 / B4 / B5(JIS) / Letter / Legal
         orientation: portrait(縦向き)/ landscape(横向き)。"縦"/"横"も可。
+        margin_top/bottom/left/right: 余白(cm、0〜50。小数可。例: 1.5)。
+          省略(None/空欄)した辺は、今の余白のまま変更しない。
+          Excelの標準は上下1.9cm・左右1.8cm、「狭い」は上下1.9・左右0.6cm。
+          余白を0にしても書き出しはできるが、プリンターによっては印刷できない端がある。
         """
         paper = _normalize_paper_size(paper_size)
         orient = _normalize_orientation(orientation)
@@ -1004,9 +1027,21 @@ class ExcelHandler:
             raise ValueError(f"枚数は整数で指定してください: 縦{pages_tall} × 横{pages_wide}") from e
         if not (1 <= tall <= _MAX_FIT_PAGES and 1 <= wide <= _MAX_FIT_PAGES):
             raise ValueError(f"枚数は1〜{_MAX_FIT_PAGES}で指定してください: 縦{tall} × 横{wide}")
+        margins: dict[str, float] = {}
+        for key, label, value in (
+            ("top", "上", margin_top), ("bottom", "下", margin_bottom),
+            ("left", "左", margin_left), ("right", "右", margin_right),
+        ):
+            parsed = _parse_margin(label, value)
+            if parsed is not None:
+                margins[key] = parsed
 
         entry = self._active()
-        settings = {"paper": paper, "orientation": orient, "pages_tall": tall, "pages_wide": wide}
+        settings: dict[str, Any] = {
+            "paper": paper, "orientation": orient, "pages_tall": tall, "pages_wide": wide,
+        }
+        if margins:
+            settings["margins"] = margins
         if entry.get("com"):
             ws = self._com_sheet(entry, sheet_name)
             self._apply_page_settings_com(ws, settings)
@@ -1020,9 +1055,18 @@ class ExcelHandler:
             ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
             ws.page_setup.fitToHeight = tall
             ws.page_setup.fitToWidth = wide
-        self._print_settings(entry, sheet_name).update(settings)
+            for key, cm in margins.items():
+                setattr(ws.page_margins, key, cm / 2.54)  # openpyxlの余白の単位はインチ
+        stored = self._print_settings(entry, sheet_name)
+        stored.update({k: v for k, v in settings.items() if k != "margins"})
+        if margins:
+            stored.setdefault("margins", {}).update(margins)  # 指定しなかった辺の以前の設定は残す
         label = "縦向き" if orient == "portrait" else "横向き"
-        return f"ページ設定しました: {sheet_name} {paper}・{label}・縦{tall}枚×横{wide}枚に収める"
+        names = {"top": "上", "bottom": "下", "left": "左", "right": "右"}
+        margin_text = (
+            "・余白 " + " ".join(f"{names[k]}{margins[k]:g}cm" for k in ("top", "bottom", "left", "right") if k in margins)
+        ) if margins else ""
+        return f"ページ設定しました: {sheet_name} {paper}・{label}・縦{tall}枚×横{wide}枚に収める{margin_text}"
 
     def lookup_range_for_date(
         self, source_path: str, date: str = "", source_sheet: str = "", default_range: str = "",
