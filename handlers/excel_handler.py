@@ -84,6 +84,13 @@ _XL_ORIENTATION = {"portrait": 1, "landscape": 2}  # xlPortrait / xlLandscape
 # xlPaperSize(openpyxlのpage_setup.paperSizeも同じ番号)。B4/B5はJIS規格
 _PAPER_SIZES = {"A3": 8, "A4": 9, "A5": 11, "B4": 12, "B5": 13, "LETTER": 1, "LEGAL": 5}
 _MAX_FIT_PAGES = 100
+# 用紙サイズに「印刷範囲そのまま」を選んだ印を、記録済み設定(paper)に入れる値
+_FIT_PAPER = "FIT"
+FIT_PAPER_LABEL = "印刷範囲そのまま"
+_FIT_PAPER_ALIASES = {
+    "FIT", "AREA", "範囲", "範囲に合わせる", "印刷範囲", "印刷範囲そのまま", "印刷範囲の大きさそのまま",
+}
+_A3_POINTS = (841.92, 1190.52)  # A3の幅×高さ(縦向き、pt)。範囲そのまま出力の作業用紙
 
 _CELL_RANGE_RE = re.compile(r"[A-Z]{1,3}[0-9]+(:[A-Z]{1,3}[0-9]+)?")
 _DATE_RE = re.compile(r"(\d{4})\D+(\d{1,2})\D+(\d{1,2})")
@@ -91,9 +98,12 @@ _DATE_RE = re.compile(r"(\d{4})\D+(\d{1,2})\D+(\d{1,2})")
 
 def _normalize_paper_size(paper_size: str) -> str:
     key = str(paper_size).strip().upper().replace("(JIS)", "").replace("JIS", "").replace(" ", "")
+    if key in _FIT_PAPER_ALIASES:
+        return _FIT_PAPER
     if key not in _PAPER_SIZES:
         raise ValueError(
-            f"用紙サイズが未対応です: {paper_size}(使えるもの: A3 / A4 / A5 / B4 / B5 / Letter / Legal)"
+            f"用紙サイズが未対応です: {paper_size}"
+            f"(使えるもの: A3 / A4 / A5 / B4 / B5 / Letter / Legal / {FIT_PAPER_LABEL})"
         )
     return key
 
@@ -958,21 +968,24 @@ class ExcelHandler:
         """記録済みの印刷設定(範囲/用紙/向き/枚数)を、COMのワークシートへ適用する。"""
         try:
             ps = ws.PageSetup
-            if "orientation" in settings:
+            # 「印刷範囲そのまま」のときの用紙・向き・拡大率・余白は、書き出しの直前に
+            # _export_pdf_fit が印刷範囲の実寸から決める(ここでは触らない)
+            fit = settings.get("paper") == _FIT_PAPER
+            if "orientation" in settings and not fit:
                 ps.Orientation = _XL_ORIENTATION[settings["orientation"]]
-            if "paper" in settings:
+            if "paper" in settings and not fit:
                 ps.PaperSize = _PAPER_SIZES[settings["paper"]]
             for key, attr in (("top", "TopMargin"), ("bottom", "BottomMargin"),
                               ("left", "LeftMargin"), ("right", "RightMargin")):
-                if key in settings.get("margins", {}):
+                if key in settings.get("margins", {}) and not fit:
                     setattr(ps, attr, settings["margins"][key] / 2.54 * 72)  # cm → ポイント
             if "area" in settings:
                 ps.PrintArea = settings["area"]
-            if "title_cols" in settings:
+            if "title_cols" in settings and not fit:
                 ps.PrintTitleColumns = settings["title_cols"]
-            if "title_rows" in settings:
+            if "title_rows" in settings and not fit:
                 ps.PrintTitleRows = settings["title_rows"]
-            if "pages_tall" in settings:
+            if "pages_tall" in settings and not fit:
                 ps.Zoom = False  # これを先に外さないと、FitToPages指定が効かない
                 ps.FitToPagesTall = settings["pages_tall"]
                 ps.FitToPagesWide = settings["pages_wide"]
@@ -1012,7 +1025,12 @@ class ExcelHandler:
         指定した枚数に収まるよう自動で縮小される(Excelの「拡大縮小印刷」の
         「次のページ数に合わせて印刷」と同じで、縮小のみ。100%より大きくは
         拡大されない)。この設定は save_as_pdf のPDF出力にも反映される。
-        paper_size: A3 / A4 / A5 / B4 / B5(JIS) / Letter / Legal
+        paper_size: A3 / A4 / A5 / B4 / B5(JIS) / Letter / Legal / 印刷範囲そのまま
+          「印刷範囲そのまま」は、PDFのページを印刷範囲ちょうどの大きさ・形にする
+          (壁紙などで余計な余白を出したくないとき用)。この場合、向き・枚数・余白の
+          指定は使われない(1ページに、余白なしで収まる)。大きさは最大でA3に収まる
+          範囲まで(それより大きい範囲は、形はそのまま縮小して1ページにする)。
+          必ず sheet_name を指定した save_as_pdf で書き出すこと(全シート書き出しは不可)。
         orientation: portrait(縦向き)/ landscape(横向き)。"縦"/"横"も可。
         margin_top/bottom/left/right: 余白(cm、0〜50。小数可。例: 1.5)。
           省略(None/空欄)した辺は、今の余白のまま変更しない。
@@ -1020,6 +1038,17 @@ class ExcelHandler:
           余白を0にしても書き出しはできるが、プリンターによっては印刷できない端がある。
         """
         paper = _normalize_paper_size(paper_size)
+        if paper == _FIT_PAPER:
+            entry = self._active()
+            if entry.get("com"):
+                self._apply_page_settings_com(self._com_sheet(entry, sheet_name), {"paper": _FIT_PAPER})
+            elif sheet_name not in entry["wb"].sheetnames:
+                raise KeyError(f"シートが見つかりません: {sheet_name}")
+            self._print_settings(entry, sheet_name)["paper"] = _FIT_PAPER
+            return (
+                f"ページ設定しました: {sheet_name} {FIT_PAPER_LABEL}"
+                "(PDFのページを印刷範囲ちょうどの大きさにします。向き・枚数・余白の指定は使いません)"
+            )
         orient = _normalize_orientation(orientation)
         try:
             tall, wide = int(pages_tall), int(pages_wide)
@@ -1347,6 +1376,126 @@ class ExcelHandler:
                 continue
             self._apply_page_settings_com(ws, settings)
 
+    @staticmethod
+    def _pdf_content_box(pdf_path: Path) -> tuple[int, float, float, float, float]:
+        """PDFの(ページ数, 1ページ目の塗りの外接長方形 x0, top, x1, bottom)を返す。"""
+        import pdfplumber
+
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            rects = pdf.pages[0].rects
+            if not rects:
+                raise RuntimeError("印刷範囲の大きさをPDFから測れませんでした(描画された領域がありません)")
+            return (
+                len(pdf.pages),
+                min(r["x0"] for r in rects), min(r["top"] for r in rects),
+                max(r["x1"] for r in rects), max(r["bottom"] for r in rects),
+            )
+
+    def _export_pdf(self, wb, sheet_name: str | None, out: Path, fit: bool) -> None:
+        if fit:
+            self._export_pdf_fit(wb, wb.Sheets(sheet_name), out)
+            return
+        target = wb.Sheets(sheet_name) if sheet_name else wb
+        target.ExportAsFixedFormat(0, str(out))  # xlTypePDF = 0
+
+    def _export_pdf_fit(self, wb, ws, out: Path) -> None:
+        """印刷範囲ちょうどの大きさのPDF(1ページ)を書き出す。
+
+        PDF上のセルの大きさは、Excelが画面上で報告する列幅・行の高さと2〜7%ずれる
+        (印刷時はプリンターの解像度で丸められるため)。そのため計算では切り抜けないので、
+        ①余白0・A3・縮小率を決めて、②保存しない一時コピーで印刷範囲を塗りつぶして
+        書き出し、PDF上の実際の範囲(外接長方形)を測り、③本番のPDFを同じ設定で書き出して
+        その長方形に切り抜く。
+        """
+        import shutil
+        import tempfile
+
+        from pypdf import PdfReader, PdfWriter
+        from pypdf.generic import RectangleObject
+
+        ps = ws.PageSetup
+        area = (ps.PrintArea or "").replace("$", "")
+        if not area:
+            area = ws.UsedRange.Address.replace("$", "")
+        if "," in area:
+            raise ValueError(
+                f"印刷範囲が離れた複数の範囲({area})になっているため、「{FIT_PAPER_LABEL}」にできません"
+                "(1つの長方形の範囲にしてください)"
+            )
+        rng = ws.Range(area)
+        width, height = float(rng.Width), float(rng.Height)
+        if width <= 0 or height <= 0:
+            raise ValueError(f"印刷範囲 {area} の大きさが0です(行・列がすべて非表示ではありませんか)")
+
+        landscape = width >= height
+        page_w, page_h = (_A3_POINTS[1], _A3_POINTS[0]) if landscape else _A3_POINTS
+        # PDF上は画面上より最大約10%大きくなることがあるので、その分の余裕を見て縮小率を決める
+        zoom = int(min(100.0, (page_w - 8) / (width * 1.1) * 100, (page_h - 8) / (height * 1.1) * 100))
+
+        ps.PrintArea = area
+        ps.PrintTitleColumns = ""
+        ps.PrintTitleRows = ""
+        ps.PaperSize = _PAPER_SIZES["A3"]
+        ps.Orientation = _XL_ORIENTATION["landscape" if landscape else "portrait"]
+        for attr in ("TopMargin", "BottomMargin", "LeftMargin", "RightMargin", "HeaderMargin", "FooterMargin"):
+            setattr(ps, attr, 0)
+        ps.CenterHorizontally = False
+        ps.CenterVertically = False
+        for attr in ("LeftHeader", "CenterHeader", "RightHeader", "LeftFooter", "CenterFooter", "RightFooter"):
+            setattr(ps, attr, "")
+
+        win32com = _import_win32com()
+        tmpdir = Path(tempfile.mkdtemp(prefix="rpa_fit_"))
+        try:
+            probe_excel = win32com.DispatchEx("Excel.Application")
+            try:
+                probe_excel.Visible = False
+                probe_excel.DisplayAlerts = False
+                probe_excel.AutomationSecurity = 3  # msoAutomationSecurityForceDisable: コピーのマクロは動かさない
+                suffix = Path(str(wb.FullName)).suffix or ".xlsx"
+                while True:
+                    if zoom < 10:
+                        raise ValueError(
+                            f"印刷範囲 {area} が大きすぎて、A3の1ページ(最小縮小10%)に収まりません"
+                        )
+                    ps.Zoom = zoom
+                    copy, probe_pdf = tmpdir / f"probe{suffix}", tmpdir / "probe.pdf"
+                    wb.SaveCopyAs(str(copy))
+                    pb = probe_excel.Workbooks.Open(str(copy))
+                    try:
+                        pws = pb.Sheets(ws.Name)
+                        pws.Range(area).Interior.Color = 0x0000FF  # 範囲の外接長方形を測る目印(コピー上のみ)
+                        pws.ExportAsFixedFormat(0, str(probe_pdf))
+                    finally:
+                        pb.Close(SaveChanges=False)
+                    pages, x0, top, x1, bottom = self._pdf_content_box(probe_pdf)
+                    if pages == 1:
+                        break
+                    zoom = int(zoom * 0.9)  # 1ページに収まらなかったので、少し縮小してやり直す
+            finally:
+                probe_excel.Quit()
+
+            full_pdf = tmpdir / "full.pdf"
+            ws.ExportAsFixedFormat(0, str(full_pdf))
+            page = PdfReader(str(full_pdf)).pages[0]
+            box = page.mediabox
+            left, base = float(box.left), float(box.bottom)
+            page_height = float(box.height)
+            pad = 0.5  # 外枠の罫線は、セルの境目に太さの半分ほどはみ出して描かれるため、少しだけ広げる
+            new_box = RectangleObject([
+                max(left, left + x0 - pad), max(base, base + page_height - bottom - pad),
+                min(float(box.right), left + x1 + pad), min(float(box.top), base + page_height - top + pad),
+            ])
+            page.mediabox = new_box
+            page.cropbox = new_box
+            writer = PdfWriter()
+            writer.add_page(page)
+            with open(out, "wb") as f:
+                writer.write(f)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        logger.info("印刷範囲 %s(縮小率%d%%)ちょうどの大きさでPDFを書き出しました: %s", area, zoom, out)
+
     def save_as_pdf(self, path: str, output_path: str, sheet_name: str | None = None) -> str:
         """Excelファイルを、印刷範囲・ページ設定を反映してPDFへ書き出す
         (**Windows + Excelインストール環境専用**)。
@@ -1377,19 +1526,23 @@ class ExcelHandler:
 
         matched = self._find_entry_by_path(p)
         settings_by_sheet = (matched or {}).get("print_settings", {})
+        fit_sheets = [n for n, st in settings_by_sheet.items() if st.get("paper") == _FIT_PAPER]
+        if sheet_name is None and fit_sheets:
+            raise ValueError(
+                f"用紙サイズを「{FIT_PAPER_LABEL}」にしたシート({', '.join(fit_sheets)})があるため、"
+                "書き出すシート名を指定してください(全シート書き出しでは、ページごとの大きさを揃えられません)"
+            )
+        fit = sheet_name in fit_sheets
 
         if self.visible:
             if matched is not None and matched.get("com"):
                 # 既に開いているブックには印刷設定が適用済みなので、そのまま書き出す
-                wb = matched["wb"]
-                target = wb.Sheets(sheet_name) if sheet_name else wb
-                target.ExportAsFixedFormat(0, str(out))  # xlTypePDF = 0
+                self._export_pdf(matched["wb"], sheet_name, out, fit)
                 logger.info("開いているExcelをPDFに書き出しました: %s -> %s", p, out)
                 return str(out)
             wb = self._get_com_app().Workbooks.Open(str(p))
             self._apply_saved_print_settings(wb, settings_by_sheet)
-            target = wb.Sheets(sheet_name) if sheet_name else wb
-            target.ExportAsFixedFormat(0, str(out))
+            self._export_pdf(wb, sheet_name, out, fit)
             alias = self._unique_alias(p.stem)
             self._workbooks[alias] = {"wb": wb, "path": p, "last_records": [], "com": True}
             self._active_alias = alias
@@ -1407,8 +1560,7 @@ class ExcelHandler:
             wb = excel.Workbooks.Open(str(p))
             try:
                 self._apply_saved_print_settings(wb, settings_by_sheet)
-                target = wb.Sheets(sheet_name) if sheet_name else wb
-                target.ExportAsFixedFormat(0, str(out))
+                self._export_pdf(wb, sheet_name, out, fit)
             finally:
                 wb.Close(SaveChanges=False)
         finally:

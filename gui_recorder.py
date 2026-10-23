@@ -3042,7 +3042,10 @@ class RecorderApp(_AppBase):
                 f, text="用紙サイズ・向き・「縦に何枚×横に何枚に収めるか」・余白を設定します。印刷範囲が"
                 "指定した枚数に収まるよう自動で縮小されます(縮小のみで、100%より大きくは拡大されません)。"
                 "この設定は、同じファイルに対する「PDFとして保存する」のPDF出力に反映されます。"
-                "例)A4縦向きで縦1×横1 / B5横向きで縦5×横3",
+                "例)A4縦向きで縦1×横1 / B5横向きで縦5×横3。"
+                "用紙サイズを「印刷範囲そのまま」にすると、PDFのページが印刷範囲ちょうどの大きさ・形になります"
+                "(壁紙などで余計な余白を出したくないとき用。向き・枚数・余白は使われません。"
+                "書き出すときはシート名を指定してください)",
                 foreground="#557", wraplength=420, justify="left",
             ).pack(anchor="w", pady=(0, 4))
             sheet_field = ValueSlotField(f, "対象シート名")
@@ -3053,7 +3056,7 @@ class RecorderApp(_AppBase):
             ttk.Label(paper_row, text="用紙サイズ").pack(side="left", padx=(0, 6))
             paper_combo = ttk.Combobox(
                 paper_row, state="readonly", width=10,
-                values=["A3", "A4", "A5", "B4", "B5", "Letter", "Legal"],
+                values=["A3", "A4", "A5", "B4", "B5", "Letter", "Legal", "印刷範囲そのまま"],
             )
             paper_combo.set("A4")
             paper_combo.pack(side="left")
@@ -3110,6 +3113,9 @@ class RecorderApp(_AppBase):
                 anchor="w", pady=(4, 2))
 
             def refresh_summary(*_args):
+                if paper_combo.get() == "印刷範囲そのまま":
+                    summary_var.set("→ PDFのページを、印刷範囲ちょうどの大きさ・形にします(向き・枚数・余白は使いません)")
+                    return
                 label = "縦向き" if orient_var.get() == "portrait" else "横向き"
                 names = (("top", "上"), ("bottom", "下"), ("left", "左"), ("right", "右"))
                 given = [f"{n}{margin_vars[k].get().strip()}cm" for k, n in names if margin_vars[k].get().strip()]

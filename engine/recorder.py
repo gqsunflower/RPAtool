@@ -1397,8 +1397,9 @@ class MacroRecorder:
             return
         sheet_test, sheet_param = sheet_result
 
-        papers = ["A3", "A4", "A5", "B4", "B5", "Letter", "Legal"]
-        print("  用紙サイズを選んでください:")
+        papers = ["A3", "A4", "A5", "B4", "B5", "Letter", "Legal", "印刷範囲そのまま"]
+        print("  用紙サイズを選んでください(「印刷範囲そのまま」は、PDFのページを印刷範囲ちょうどの")
+        print("  大きさ・形にします。壁紙などで余白を出したくないとき用。向き・枚数・余白は使われません):")
         for i, name in enumerate(papers, start=1):
             print(f"    {i}) {name}{'(既定)' if name == 'A4' else ''}")
         choice = self._ask("  番号(空Enterで2=A4)> ").strip()
